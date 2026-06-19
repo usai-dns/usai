@@ -130,3 +130,49 @@ under `public/`; the repo is fresh (not currently a git repo), so there is no hi
 status line and views render there.
 
 **GitHub:** `gh repo view usai-dns/usai` shows the public repo with the pushed tree.
+
+---
+
+# v1 — from static dashboard to study worker
+
+The v0 above is a *static* thin shell (curated data + generated views, assets-only Worker). v1
+turns it into an **active AI-capability study worker** while preserving the shell contract.
+
+## What changed and why
+
+The brief: a worker that studies AI advancements on a schedule, benchmarks Claude Code (cloud +
+CLI), Claude-with-tools, open source, and research, and offers a chat interface to parse findings
+and deploy a framework against problems. That needs **compute + persistence + autonomy** — so v1
+deliberately supersedes the v0 "static + redeploy, no KV" decision:
+
+- **Assets-only Worker → Worker script** (`src/worker.js`) with `fetch` (dashboard + API + merged
+  state) and `scheduled` (cron-driven autonomous study). `run_worker_first` routes `/api/*` and
+  `/data/state.json` to the script; everything else is still served straight from `public/`.
+- **Static `state.json` → merged `/data/state.json`.** The static seed moved to
+  `public/data/seed.json`; the worker merges it with the study framework (from `src/studies.js`)
+  and live KV data. **`index.html` is untouched** — it still just reads `/data/state.json`, which
+  now grows as the worker studies.
+- **Added KV** (`USAI_KV`) for findings + live benchmark scores; **added a cron** (`0 13 * * *`).
+- **Added Claude** (`@anthropic-ai/sdk`, `claude-opus-4-8`, adaptive thinking, `web_search` /
+  `web_fetch` server tools) for the study pass and streaming chat. Degrades gracefully with no key.
+- **New UI as generated views only** — `chat`, `benchmark`, `findings`, `study-plan` — honoring
+  the "never extend the shell" contract. Dynamic views re-fetch on a `usai:refresh` event.
+
+## Framework
+
+Single source of truth in `src/studies.js`: 5 study tracks, a 5-subject × 7-axis commercial
+benchmark with a 0–5 rubric and seed scores, and the weekly schedule. Written up in `STUDIES.md`.
+
+## Verified locally (`wrangler dev`)
+
+- Boots; SDK bundles; `env.USAI_KV` (local) + `env.ASSETS` bound.
+- `/data/state.json` merges seed + studies + benchmark + findings + meta; assets + views serve.
+- No-key paths degrade cleanly: chat returns setup text (`x-usai-status: no-key`), study returns
+  400, scheduled logs a skip.
+- Live path reaches the Anthropic API (egress open; a bogus key yields a clean **502 api-error**,
+  not a 500) — confirming the wiring works end-to-end with a real key.
+
+## Deploy (unchanged flow, two extra one-time steps)
+
+`wrangler login` → `wrangler kv namespace create USAI_KV` (paste id) →
+`wrangler secret put ANTHROPIC_API_KEY` → `npm run deploy`. The cron then runs daily.

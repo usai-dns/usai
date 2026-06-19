@@ -1,0 +1,4 @@
+# Copy to .dev.vars (gitignored) and fill in to enable live chat + autonomous study
+# locally. Without it, the dashboard / study plan / benchmark framework still render;
+# only Claude-powered research and chat are disabled.
+ANTHROPIC_API_KEY=sk-ant-...

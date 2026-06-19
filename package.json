@@ -1,11 +1,16 @@
 {
   "name": "usai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "intellistudy — thin-shell research dashboard (canonical data + agent-generated views), served by Cloudflare Workers Static Assets.",
+  "type": "module",
+  "description": "intellistudy — a thin-shell research dashboard that studies AI capability on a schedule (autonomous web research + Claude chat) and scores a commercial benchmark, served by a Cloudflare Worker.",
   "scripts": {
     "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
+    "dev:scheduled": "wrangler dev --ip 0.0.0.0 --port 8787 --test-scheduled",
     "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.105.0"
   },
   "devDependencies": {
     "wrangler": "^4.22.0"

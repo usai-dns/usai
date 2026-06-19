@@ -1,10 +1,34 @@
-# Cloudflare Workers — assets-only Worker (no Worker script needed).
-# `wrangler dev` serves ./public locally via workerd; `wrangler deploy` ships the
-# same directory to <name>.<account>.workers.dev.
+# Cloudflare Worker — intellistudy.
+# A Worker script (src/worker.js) serves the dashboard's static assets AND a small
+# API (chat, study runner, merged state), and runs autonomous study on a cron.
+# `wrangler dev` runs it locally via workerd (no Cloudflare login); `wrangler deploy`
+# ships the same code + ./public to <name>.<account>.workers.dev.
 name = "usai"
-compatibility_date = "2025-06-19"
+main = "src/worker.js"
+compatibility_date = "2026-06-18"
+compatibility_flags = ["nodejs_compat"]
 
 [assets]
 directory = "./public"
-# serve index.html for directory requests; 404 anything else
+binding = "ASSETS"
+# Static assets are served first; these paths run the Worker instead so it can
+# serve merged live state and the API. Everything else (index.html, views/*, the
+# seed) is served straight from ./public.
+run_worker_first = ["/api/*", "/data/state.json"]
 not_found_handling = "404-page"
+
+# Persistent store for findings + live benchmark scores. `wrangler dev` simulates
+# this locally with no account. For deploy, create a namespace and paste its id:
+#   npx wrangler kv namespace create USAI_KV   (or use the Cloudflare dashboard/MCP)
+[[kv_namespaces]]
+binding = "USAI_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Autonomous study cadence. Daily at 13:00 UTC; the handler picks the day's
+# subject (see src/studies.js SCHEDULE). Edit here to change frequency.
+[triggers]
+crons = ["0 13 * * *"]
+
+# ANTHROPIC_API_KEY is a SECRET, not a var — do not put it here.
+#   local: add it to .dev.vars  (ANTHROPIC_API_KEY=sk-ant-...)
+#   cloud: npx wrangler secret put ANTHROPIC_API_KEY

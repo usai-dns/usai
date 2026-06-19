@@ -1,5 +1,9 @@
 {
   "views": [
+    "chat.js",
+    "benchmark.js",
+    "findings.js",
+    "study-plan.js",
     "convergence.js",
     "results-table.js"
   ]
