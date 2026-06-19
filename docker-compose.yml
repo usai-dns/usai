@@ -1,0 +1,12 @@
+services:
+  hub:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      # Hot-edit canonical data and views without rebuilding the image.
+      - ./public:/app/public
+      - ./wrangler.toml:/app/wrangler.toml
+    # Keep wrangler fully local/offline — no Cloudflare account or telemetry.
+    environment:
+      - WRANGLER_SEND_METRICS=false

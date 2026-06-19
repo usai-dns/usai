@@ -1,0 +1,10 @@
+# Cloudflare Workers — assets-only Worker (no Worker script needed).
+# `wrangler dev` serves ./public locally via workerd; `wrangler deploy` ships the
+# same directory to <name>.<account>.workers.dev.
+name = "usai"
+compatibility_date = "2025-06-19"
+
+[assets]
+directory = "./public"
+# serve index.html for directory requests; 404 anything else
+not_found_handling = "404-page"

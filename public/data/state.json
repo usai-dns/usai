@@ -1,0 +1,20 @@
+{
+  "experiments": [
+    {"id":"V0","name":"Instrument calibration","vary":"model","goal":"metrics recover known strong > weak","measure":"result","status":"planned"},
+    {"id":"A1","name":"Model-profile comparison","vary":"model","goal":"straightness tracks solve-rate","measure":"result","status":"planned"},
+    {"id":"C1","name":"Runtime cost spread","vary":"runtime","goal":"find best cost-of-pass runtime","measure":"cost","status":"idea"}
+  ],
+  "results": [
+    {"exp":"V0","varied":"fable-5","cost":0.42,"outcome":"pass","time":12,"straight":0.27,"revisits":0},
+    {"exp":"V0","varied":"claude-opus-4-8","cost":0.55,"outcome":"pass","time":15,"straight":0.24,"revisits":0},
+    {"exp":"V0","varied":"qwen2.5-coder","cost":0.03,"outcome":"fail","time":31,"straight":0.16,"revisits":3}
+  ],
+  "discoveries": [
+    {"id":"D1","statement":"Harness is a multiplier with a ceiling set by the base model.","status":"established"},
+    {"id":"D2","statement":"Harness = inference-time process supervision.","status":"inference"}
+  ],
+  "resources": {
+    "datasets": ["SWE-bench Verified bucket","nebius 80k","SWE-bench Pro","your Claude/Fable logs"],
+    "models": ["claude-opus-4-8","fable-5","gpt-5","qwen2.5-coder","deepseek-v3.2"]
+  }
+}

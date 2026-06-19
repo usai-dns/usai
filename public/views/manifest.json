@@ -1,0 +1,6 @@
+{
+  "views": [
+    "convergence.js",
+    "results-table.js"
+  ]
+}

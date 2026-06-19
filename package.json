@@ -1,0 +1,13 @@
+{
+  "name": "usai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "intellistudy — thin-shell research dashboard (canonical data + agent-generated views), served by Cloudflare Workers Static Assets.",
+  "scripts": {
+    "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.22.0"
+  }
+}
