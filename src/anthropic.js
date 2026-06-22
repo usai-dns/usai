@@ -21,7 +21,11 @@ const WEB_SEARCH = { type: "web_search_20260209", name: "web_search", max_uses: 
 const WEB_FETCH = { type: "web_fetch_20260209", name: "web_fetch", max_uses: 2 };
 
 function client(env) {
-  return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  // Bound each call: an 80s per-attempt timeout with a single retry caps a slow
+  // web-search turn (which can otherwise hang and 524 server-side) at ~160s and
+  // surfaces a clean error, instead of the SDK's default 2 retries compounding a
+  // slow call into 6+ minutes.
+  return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: 80000, maxRetries: 1 });
 }
 
 export function hasKey(env) {
@@ -88,7 +92,7 @@ export async function runStudy(
     for (let i = 0; i < maxLoops; i++) {
       message = await anthropic.messages.create({
         model: MODEL,
-        max_tokens: 8000,
+        max_tokens: 5000,
         thinking: { type: "adaptive" },
         output_config: { effort },
         system: STUDY_SYSTEM,
