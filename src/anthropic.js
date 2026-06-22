@@ -15,9 +15,10 @@ import Anthropic from "@anthropic-ai/sdk";
 export const MODEL = "claude-opus-4-8";
 
 // Server-side web tools (dynamic-filtering variants — supported on Opus 4.8).
-// Bounded uses keep a single run's wall-clock/cost in check.
-const WEB_SEARCH = { type: "web_search_20260209", name: "web_search", max_uses: 5 };
-const WEB_FETCH = { type: "web_fetch_20260209", name: "web_fetch", max_uses: 3 };
+// Bounded uses keep a single run's wall-clock/cost in check so it completes well
+// within an HTTP request's practical lifetime.
+const WEB_SEARCH = { type: "web_search_20260209", name: "web_search", max_uses: 3 };
+const WEB_FETCH = { type: "web_fetch_20260209", name: "web_fetch", max_uses: 2 };
 
 function client(env) {
   return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
@@ -75,7 +76,7 @@ export async function runStudy(env, { subjectId, task, effort = "medium" }) {
   let message = null;
 
   try {
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 4; i++) {
       message = await anthropic.messages.create({
         model: MODEL,
         max_tokens: 8000,

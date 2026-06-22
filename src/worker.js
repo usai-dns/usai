@@ -206,11 +206,12 @@ async function handleChat(env, request) {
   });
 }
 
-// On-demand study. A full research pass can take a minute or two — longer than a
-// synchronous HTTP response should hold — so we kick it off in the background
-// (ctx.waitUntil keeps the Worker alive past the response) and return 202
-// immediately. The client polls /data/state.json for the new finding.
-async function handleStudyRun(env, request, ctx) {
+// On-demand study. Runs synchronously and returns the filed finding — Workers
+// keep an I/O-bound request (awaiting the Anthropic API) alive long enough, and
+// the run is bounded (medium effort, web_search<=3, web_fetch<=2, loop<=4) so it
+// finishes in ~30-90s. (ctx.waitUntil is NOT viable here — Cloudflare cancels
+// post-response background work; the cron path has the 15-min budget for "high".)
+async function handleStudyRun(env, request) {
   if (!hasKey(env)) return json({ error: "no-key", detail: "Set ANTHROPIC_API_KEY to run studies." }, 400);
   let body = {};
   try {
@@ -221,19 +222,15 @@ async function handleStudyRun(env, request, ctx) {
   const subjectId = (body.subject && String(body.subject)) || subjectForDate();
   const subj = subjectId === "idle" ? "claude-code-cloud" : subjectId; // never study 'idle'
 
-  ctx.waitUntil(
-    runAndPersist(env, {
-      subjectId: subj,
-      url: body.url ? String(body.url) : undefined,
-      question: body.question ? String(body.question) : undefined,
-      trigger: "manual",
-      effort: "medium"
-    })
-      .then((r) => console.log(`[study/run] ${subj}:`, r.ok ? "filed" : r.reason, r.detail || ""))
-      .catch((e) => console.log(`[study/run] ${subj} error:`, e?.message || e))
-  );
-
-  return json({ status: "running", subject: subj, note: "Filing in the background; poll /data/state.json for the new finding (~1-2 min)." }, 202);
+  const result = await runAndPersist(env, {
+    subjectId: subj,
+    url: body.url ? String(body.url) : undefined,
+    question: body.question ? String(body.question) : undefined,
+    trigger: "manual",
+    effort: "medium"
+  });
+  if (!result.ok) return json({ error: result.reason || "study-failed", detail: result.detail }, 502);
+  return json(result.finding);
 }
 
 export default {
@@ -258,14 +255,17 @@ export default {
       return handleChat(env, request);
     }
     if (pathname === "/api/study/run" && request.method === "POST") {
-      return handleStudyRun(env, request, ctx);
+      return handleStudyRun(env, request);
     }
 
     // Everything else is a static asset (the shell, views, seed.json, …).
     return env.ASSETS.fetch(request);
   },
 
-  // Cron: study the day's subject and file the result.
+  // Cron: study the day's subject and file the result. Awaited directly so the
+  // runtime keeps the invocation alive until it resolves (up to 15 min) — unlike
+  // a fetch handler's waitUntil, scheduled invocations wait for the returned
+  // promise. Higher effort here since there's budget.
   async scheduled(controller, env, ctx) {
     const subjectId = subjectForDate(new Date());
     if (subjectId === "idle") return; // Sunday — rest
@@ -273,10 +273,11 @@ export default {
       console.log("[scheduled] skipped: ANTHROPIC_API_KEY not set");
       return;
     }
-    ctx.waitUntil(
-      runAndPersist(env, { subjectId, trigger: "scheduled", effort: "high" })
-        .then((r) => console.log(`[scheduled] ${subjectId}:`, r.ok ? "filed" : r.reason))
-        .catch((e) => console.log(`[scheduled] ${subjectId} error:`, e?.message || e))
-    );
+    try {
+      const r = await runAndPersist(env, { subjectId, trigger: "scheduled", effort: "high" });
+      console.log(`[scheduled] ${subjectId}:`, r.ok ? "filed" : r.reason, r.detail || "");
+    } catch (e) {
+      console.log(`[scheduled] ${subjectId} error:`, e?.message || e);
+    }
   }
 };
