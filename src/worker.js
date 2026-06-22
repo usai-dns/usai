@@ -206,11 +206,42 @@ async function handleChat(env, request) {
   });
 }
 
-// On-demand study. Runs synchronously and returns the filed finding — Workers
-// keep an I/O-bound request (awaiting the Anthropic API) alive long enough, and
-// the run is bounded (medium effort, web_search<=3, web_fetch<=2, loop<=4) so it
-// finishes in ~30-90s. (ctx.waitUntil is NOT viable here — Cloudflare cancels
-// post-response background work; the cron path has the 15-min budget for "high".)
+// Wrap a long-running study promise in a streamed response: flush headers and a
+// heartbeat immediately (and every ~12s) so Cloudflare's ~100s edge timeout never
+// fires, then emit the final JSON (finding or error) as the last line. Heartbeats
+// are whitespace, so the client just trims and parses the body.
+function studyStream(runPromise) {
+  const enc = new TextEncoder();
+  return new ReadableStream({
+    async start(controller) {
+      controller.enqueue(enc.encode(" \n")); // flush response headers right away
+      const hb = setInterval(() => {
+        try {
+          controller.enqueue(enc.encode(" "));
+        } catch {
+          /* controller may be closed */
+        }
+      }, 12000);
+      let payload;
+      try {
+        const r = await runPromise;
+        payload = r.ok ? r.finding : { error: r.reason || "study-failed", detail: r.detail };
+      } catch (e) {
+        payload = { error: "study-failed", detail: e?.message || String(e) };
+      } finally {
+        clearInterval(hb);
+      }
+      controller.enqueue(enc.encode("\n" + JSON.stringify(payload)));
+      controller.close();
+    }
+  });
+}
+
+// On-demand study. A run's web-search latency is variable (often >100s), which
+// overruns Cloudflare's edge response timeout for a normal request — so we STREAM
+// the response (heartbeats keep it alive) and return the finding when it lands.
+// Budget stays modest (low effort, <=2 searches) to keep total duration sane;
+// thorough multi-search runs happen on the cron (15-min budget).
 async function handleStudyRun(env, request) {
   if (!hasKey(env)) return json({ error: "no-key", detail: "Set ANTHROPIC_API_KEY to run studies." }, 400);
   let body = {};
@@ -222,17 +253,20 @@ async function handleStudyRun(env, request) {
   const subjectId = (body.subject && String(body.subject)) || subjectForDate();
   const subj = subjectId === "idle" ? "claude-code-cloud" : subjectId; // never study 'idle'
 
-  // Lean budget (runStudy defaults: low effort, <=2 searches/fetches, 2 loops)
-  // so the synchronous response returns in ~30-50s, under the edge timeout.
-  const result = await runAndPersist(env, {
+  const runPromise = runAndPersist(env, {
     subjectId: subj,
     url: body.url ? String(body.url) : undefined,
     question: body.question ? String(body.question) : undefined,
     trigger: "manual",
-    effort: "low"
+    effort: "low",
+    maxSearch: 2,
+    maxFetch: 2,
+    maxLoops: 2
   });
-  if (!result.ok) return json({ error: result.reason || "study-failed", detail: result.detail }, 502);
-  return json(result.finding);
+
+  return new Response(studyStream(runPromise), {
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-usai-status": "ok" }
+  });
 }
 
 export default {

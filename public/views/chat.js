@@ -95,16 +95,29 @@ HUB.registerView({
       runBtn.disabled = true;
       // The request runs the research synchronously and returns the finding;
       // it can take ~1-2 min, so show progress and let the fetch wait.
-      status.textContent = `Studying ${subject}${url ? " + " + url : ""}… this can take 1-2 min, hang tight.`;
+      status.textContent = `Studying ${subject}${url ? " + " + url : ""}… this can take ~1 min, hang tight.`;
       try {
         const res = await fetch("/api/study/run", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ subject, url: url || undefined })
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          status.textContent = "⚠️ " + (data.error || "study failed") + (data.detail ? " — " + data.detail : "");
+        if (res.status === 400) {
+          const d = await res.json().catch(() => ({}));
+          status.textContent = "⚠️ " + (d.error || "study failed") + (d.detail ? " — " + d.detail : "");
+          runBtn.disabled = false;
+          return;
+        }
+        // Streamed response: whitespace heartbeats + a final JSON line.
+        const text = await res.text();
+        let data;
+        try {
+          data = JSON.parse(text.trim());
+        } catch {
+          data = { error: "could not parse study result" };
+        }
+        if (data.error) {
+          status.textContent = "⚠️ " + data.error + (data.detail ? " — " + data.detail : "");
         } else {
           status.innerHTML = `✓ Filed: <b style="color:var(--paper)">${data.headline || data.subjectName || subject}</b>. Findings &amp; benchmark updated.`;
           el.querySelector("#usaiUrl").value = "";
