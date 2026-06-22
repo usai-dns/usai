@@ -112,9 +112,9 @@ async function buildState(env, request) {
 }
 
 // Run a study pass and persist the finding + score updates.
-async function runAndPersist(env, { subjectId, url, question, trigger, effort }) {
+async function runAndPersist(env, { subjectId, url, question, trigger, effort, maxSearch, maxFetch, maxLoops }) {
   const task = studyTask(subjectId, { url, question });
-  const result = await runStudy(env, { subjectId, task, effort });
+  const result = await runStudy(env, { subjectId, task, effort, maxSearch, maxFetch, maxLoops });
   if (!result.ok) return result;
 
   const finding = {
@@ -222,12 +222,14 @@ async function handleStudyRun(env, request) {
   const subjectId = (body.subject && String(body.subject)) || subjectForDate();
   const subj = subjectId === "idle" ? "claude-code-cloud" : subjectId; // never study 'idle'
 
+  // Lean budget (runStudy defaults: low effort, <=2 searches/fetches, 2 loops)
+  // so the synchronous response returns in ~30-50s, under the edge timeout.
   const result = await runAndPersist(env, {
     subjectId: subj,
     url: body.url ? String(body.url) : undefined,
     question: body.question ? String(body.question) : undefined,
     trigger: "manual",
-    effort: "medium"
+    effort: "low"
   });
   if (!result.ok) return json({ error: result.reason || "study-failed", detail: result.detail }, 502);
   return json(result.finding);
@@ -274,7 +276,15 @@ export default {
       return;
     }
     try {
-      const r = await runAndPersist(env, { subjectId, trigger: "scheduled", effort: "high" });
+      // Thorough budget — a scheduled invocation has a 15-minute window.
+      const r = await runAndPersist(env, {
+        subjectId,
+        trigger: "scheduled",
+        effort: "high",
+        maxSearch: 4,
+        maxFetch: 3,
+        maxLoops: 4
+      });
       console.log(`[scheduled] ${subjectId}:`, r.ok ? "filed" : r.reason, r.detail || "");
     } catch (e) {
       console.log(`[scheduled] ${subjectId} error:`, e?.message || e);

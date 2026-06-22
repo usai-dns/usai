@@ -66,24 +66,33 @@ const STUDY_SYSTEM =
   "sources. You finish with the requested JSON block, exactly.";
 
 // One research pass. Handles the server-tool pause_turn loop. Non-streaming
-// (bounded max_tokens). `effort` defaults to medium for snappy on-demand runs;
-// the scheduled cron passes "high" since it has a 15-minute budget.
-export async function runStudy(env, { subjectId, task, effort = "medium" }) {
+// (bounded max_tokens). Budgets are per-call: on-demand HTTP runs lean
+// (low effort, few searches) to finish well under Cloudflare's ~100s edge
+// response timeout; the scheduled cron runs thorough (high effort, more
+// searches) since a scheduled invocation has a 15-minute budget.
+export async function runStudy(
+  env,
+  { subjectId, task, effort = "low", maxSearch = 2, maxFetch = 2, maxLoops = 2 }
+) {
   if (!hasKey(env)) return { ok: false, reason: "no-key" };
   const anthropic = client(env);
 
+  const tools = [
+    { type: "web_search_20260209", name: "web_search", max_uses: maxSearch },
+    { type: "web_fetch_20260209", name: "web_fetch", max_uses: maxFetch }
+  ];
   let messages = [{ role: "user", content: task }];
   let message = null;
 
   try {
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < maxLoops; i++) {
       message = await anthropic.messages.create({
         model: MODEL,
         max_tokens: 8000,
         thinking: { type: "adaptive" },
         output_config: { effort },
         system: STUDY_SYSTEM,
-        tools: [WEB_SEARCH, WEB_FETCH],
+        tools,
         messages
       });
       // Server-side tool loop hit its iteration cap — re-send to resume.
