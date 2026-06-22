@@ -78,7 +78,20 @@ curl "http://localhost:8787/cdn-cgi/handler/scheduled?cron=0+13+*+*+*"
 | `/data/state.json` | GET | Merged canonical data (seed + live findings/scores) — what the shell reads |
 | `/api/health` | GET | `{ ok, hasKey, model, kv, lastRuns, todaysSubject }` |
 | `/api/chat` | POST | `{ messages, studyUrl? }` → streamed answer over the corpus |
-| `/api/study/run` | POST | `{ subject?, url?, question? }` → runs one study pass, files a finding |
+| `/api/study/run` | POST | `{ subject?, url?, question? }` → runs one study pass, **streams** heartbeats then the finding JSON |
+
+## Operational notes
+
+Study runs do live web research, so latency is real and variable (~40–160s):
+
+- **On-demand (`/api/study/run`)** runs lean (low effort, ≤2 searches) and **streams** the
+  response — an immediate heartbeat keeps the connection alive past Cloudflare's ~100s edge
+  timeout, then the finding JSON arrives as the final line. The Anthropic client is bounded (80s
+  timeout, 1 retry) so a slow turn fails cleanly in ~160s instead of a multi-minute retry storm.
+- **Scheduled (cron)** runs thorough (high effort, more searches) — a scheduled invocation has a
+  15-minute budget and isn't subject to the HTTP edge timeout, so it's the reliable producer.
+- Each run costs Claude tokens (your `ANTHROPIC_API_KEY`). The daily cron fills the benchmark for
+  free over a week; "Run now" / `/api/study/run` is for when you want a subject studied immediately.
 
 ## Deploy to Cloudflare
 
