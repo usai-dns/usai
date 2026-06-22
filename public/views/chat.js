@@ -89,25 +89,51 @@ HUB.registerView({
       sendBtn.disabled = false;
     }
 
+    const getState = async () => {
+      try {
+        const r = await fetch("/data/state.json", { cache: "no-store" });
+        return r.ok ? await r.json() : null;
+      } catch {
+        return null;
+      }
+    };
+
     async function runStudy() {
       const subject = el.querySelector("#usaiSubj").value;
       const url = el.querySelector("#usaiUrl").value.trim();
       runBtn.disabled = true;
-      status.textContent = `Studying ${subject}${url ? " + " + url : ""}… (this can take a minute)`;
+      // Baseline so we can detect the new finding when it lands.
+      const before = await getState();
+      const baseTs = before && before.meta && before.meta.lastRuns ? before.meta.lastRuns[subject] || "" : "";
+      status.textContent = `Studying ${subject}${url ? " + " + url : ""}… filing in the background (~1-2 min).`;
       try {
         const res = await fetch("/api/study/run", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ subject, url: url || undefined })
         });
-        const data = await res.json();
         if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
           status.textContent = "⚠️ " + (data.error || "study failed") + (data.detail ? " — " + data.detail : "");
-        } else {
-          status.innerHTML = `✓ Filed: <b style="color:var(--paper)">${data.headline || data.subjectName}</b>. Findings &amp; benchmark updated.`;
-          el.querySelector("#usaiUrl").value = "";
-          window.dispatchEvent(new CustomEvent("usai:refresh"));
+          runBtn.disabled = false;
+          return;
         }
+        el.querySelector("#usaiUrl").value = "";
+        // Poll for the finding to land (up to ~3 min).
+        for (let i = 0; i < 22; i++) {
+          await new Promise((r) => setTimeout(r, 8000));
+          const s = await getState();
+          const ts = s && s.meta && s.meta.lastRuns ? s.meta.lastRuns[subject] || "" : "";
+          if (ts && ts !== baseTs) {
+            const f = (s.findings || []).find((x) => x.subject === subject && x.ts === ts);
+            status.innerHTML = `✓ Filed: <b style="color:var(--paper)">${(f && f.headline) || subject}</b>. Findings &amp; benchmark updated.`;
+            window.dispatchEvent(new CustomEvent("usai:refresh"));
+            runBtn.disabled = false;
+            return;
+          }
+          status.textContent = `Studying ${subject}… still working (${(i + 1) * 8}s).`;
+        }
+        status.textContent = "Study is taking longer than expected — it may still land. Try refreshing in a minute.";
       } catch (e) {
         status.textContent = "⚠️ " + (e && e.message ? e.message : e);
       }

@@ -15,8 +15,9 @@ import Anthropic from "@anthropic-ai/sdk";
 export const MODEL = "claude-opus-4-8";
 
 // Server-side web tools (dynamic-filtering variants — supported on Opus 4.8).
-const WEB_SEARCH = { type: "web_search_20260209", name: "web_search", max_uses: 6 };
-const WEB_FETCH = { type: "web_fetch_20260209", name: "web_fetch", max_uses: 4 };
+// Bounded uses keep a single run's wall-clock/cost in check.
+const WEB_SEARCH = { type: "web_search_20260209", name: "web_search", max_uses: 5 };
+const WEB_FETCH = { type: "web_fetch_20260209", name: "web_fetch", max_uses: 3 };
 
 function client(env) {
   return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
@@ -64,8 +65,9 @@ const STUDY_SYSTEM =
   "sources. You finish with the requested JSON block, exactly.";
 
 // One research pass. Handles the server-tool pause_turn loop. Non-streaming
-// (bounded max_tokens) so the scheduled handler stays simple.
-export async function runStudy(env, { subjectId, task }) {
+// (bounded max_tokens). `effort` defaults to medium for snappy on-demand runs;
+// the scheduled cron passes "high" since it has a 15-minute budget.
+export async function runStudy(env, { subjectId, task, effort = "medium" }) {
   if (!hasKey(env)) return { ok: false, reason: "no-key" };
   const anthropic = client(env);
 
@@ -73,12 +75,12 @@ export async function runStudy(env, { subjectId, task }) {
   let message = null;
 
   try {
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 6; i++) {
       message = await anthropic.messages.create({
         model: MODEL,
         max_tokens: 8000,
         thinking: { type: "adaptive" },
-        output_config: { effort: "high" },
+        output_config: { effort },
         system: STUDY_SYSTEM,
         tools: [WEB_SEARCH, WEB_FETCH],
         messages

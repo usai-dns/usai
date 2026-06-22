@@ -112,9 +112,9 @@ async function buildState(env, request) {
 }
 
 // Run a study pass and persist the finding + score updates.
-async function runAndPersist(env, { subjectId, url, question, trigger }) {
+async function runAndPersist(env, { subjectId, url, question, trigger, effort }) {
   const task = studyTask(subjectId, { url, question });
-  const result = await runStudy(env, { subjectId, task });
+  const result = await runStudy(env, { subjectId, task, effort });
   if (!result.ok) return result;
 
   const finding = {
@@ -206,7 +206,11 @@ async function handleChat(env, request) {
   });
 }
 
-async function handleStudyRun(env, request) {
+// On-demand study. A full research pass can take a minute or two — longer than a
+// synchronous HTTP response should hold — so we kick it off in the background
+// (ctx.waitUntil keeps the Worker alive past the response) and return 202
+// immediately. The client polls /data/state.json for the new finding.
+async function handleStudyRun(env, request, ctx) {
   if (!hasKey(env)) return json({ error: "no-key", detail: "Set ANTHROPIC_API_KEY to run studies." }, 400);
   let body = {};
   try {
@@ -216,14 +220,20 @@ async function handleStudyRun(env, request) {
   }
   const subjectId = (body.subject && String(body.subject)) || subjectForDate();
   const subj = subjectId === "idle" ? "claude-code-cloud" : subjectId; // never study 'idle'
-  const result = await runAndPersist(env, {
-    subjectId: subj,
-    url: body.url ? String(body.url) : undefined,
-    question: body.question ? String(body.question) : undefined,
-    trigger: "manual"
-  });
-  if (!result.ok) return json({ error: result.reason || "study-failed", detail: result.detail }, 502);
-  return json(result.finding);
+
+  ctx.waitUntil(
+    runAndPersist(env, {
+      subjectId: subj,
+      url: body.url ? String(body.url) : undefined,
+      question: body.question ? String(body.question) : undefined,
+      trigger: "manual",
+      effort: "medium"
+    })
+      .then((r) => console.log(`[study/run] ${subj}:`, r.ok ? "filed" : r.reason, r.detail || ""))
+      .catch((e) => console.log(`[study/run] ${subj} error:`, e?.message || e))
+  );
+
+  return json({ status: "running", subject: subj, note: "Filing in the background; poll /data/state.json for the new finding (~1-2 min)." }, 202);
 }
 
 export default {
@@ -248,7 +258,7 @@ export default {
       return handleChat(env, request);
     }
     if (pathname === "/api/study/run" && request.method === "POST") {
-      return handleStudyRun(env, request);
+      return handleStudyRun(env, request, ctx);
     }
 
     // Everything else is a static asset (the shell, views, seed.json, …).
@@ -264,7 +274,7 @@ export default {
       return;
     }
     ctx.waitUntil(
-      runAndPersist(env, { subjectId, trigger: "scheduled" })
+      runAndPersist(env, { subjectId, trigger: "scheduled", effort: "high" })
         .then((r) => console.log(`[scheduled] ${subjectId}:`, r.ok ? "filed" : r.reason))
         .catch((e) => console.log(`[scheduled] ${subjectId} error:`, e?.message || e))
     );
