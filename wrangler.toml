@@ -22,7 +22,7 @@ not_found_handling = "404-page"
 #   npx wrangler kv namespace create USAI_KV   (or use the Cloudflare dashboard/MCP)
 [[kv_namespaces]]
 binding = "USAI_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "3cbf7af7c8354f2fafffc1e87fabdccb"
 
 # Autonomous study cadence. Daily at 13:00 UTC; the handler picks the day's
 # subject (see src/studies.js SCHEDULE). Edit here to change frequency.
