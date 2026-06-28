@@ -122,6 +122,7 @@ export async function runStudy(
     summary: (parsed.summary || text).toString().slice(0, 2000),
     findings: Array.isArray(parsed.findings) ? parsed.findings.slice(0, 8) : [],
     scores: parsed.scores && typeof parsed.scores === "object" ? parsed.scores : {},
+    leaderboard: Array.isArray(parsed.leaderboard) ? parsed.leaderboard.slice(0, 25) : undefined,
     usage: message?.usage || null
   };
 }

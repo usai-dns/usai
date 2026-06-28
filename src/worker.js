@@ -33,6 +33,7 @@ import { runStudy, streamChat, hasKey, MODEL } from "./anthropic.js";
 const FINDINGS_KEY = "findings";
 const SCORES_KEY = "scores";
 const LASTRUNS_KEY = "lastRuns";
+const KAGGLE_KEY = "kaggle";
 const MAX_FINDINGS = 200;
 
 const json = (data, status = 200) =>
@@ -83,10 +84,11 @@ async function buildState(env, request) {
     /* seed missing — render framework only */
   }
 
-  const [liveScores, liveFindings, lastRuns] = await Promise.all([
+  const [liveScores, liveFindings, lastRuns, kaggle] = await Promise.all([
     kvGet(env, SCORES_KEY, {}),
     kvGet(env, FINDINGS_KEY, []),
-    kvGet(env, LASTRUNS_KEY, {})
+    kvGet(env, LASTRUNS_KEY, {}),
+    kvGet(env, KAGGLE_KEY, null)
   ]);
 
   const findings = [...liveFindings, ...SEED_FINDINGS];
@@ -100,6 +102,7 @@ async function buildState(env, request) {
       scale: BENCHMARK.scale,
       scores: mergeScores(liveScores)
     },
+    kaggle,
     findings,
     meta: {
       generated: new Date().toISOString(),
@@ -154,6 +157,21 @@ async function runAndPersist(env, { subjectId, url, question, trigger, effort, m
       }
     }
     await kvPut(env, SCORES_KEY, scores);
+  }
+
+  // Kaggle runs also produce a leaderboard snapshot that drives its own board view.
+  if (subjectId === "kaggle" && Array.isArray(result.leaderboard) && result.leaderboard.length) {
+    await kvPut(env, KAGGLE_KEY, {
+      leaderboard: result.leaderboard.map((r) => ({
+        model: String(r.model || ""),
+        score: String(r.score ?? ""),
+        benchmark: String(r.benchmark || r.task || ""),
+        url: String(r.url || "")
+      })),
+      headline: finding.headline,
+      updated: finding.ts,
+      source: (finding.points[0] && finding.points[0].url) || null
+    });
   }
 
   // Record last-run time.

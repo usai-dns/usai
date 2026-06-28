@@ -21,6 +21,7 @@ matters for deployment, seed sources, and anchor questions the worker tries to a
 | 3 | **Claude + Tools & Systems** | Claude driving MCP, tool use, the Agent SDK, computer use, Managed Agents | Solving problems in your stack means Claude must reliably operate real systems, not just emit text |
 | 4 | **Open Source** | Open-weight models + open agent frameworks (OpenHands/Aider-style), capability, cost, self-hostability | Sets the cost floor and the self-host fallback — the economic benchmark for everything you deploy |
 | 5 | **Research & Evals** | Frontier papers, new benchmarks (SWE-bench & successors), eval design, inference-time techniques | Leading indicator of what your stack can do in 3–6 months and how to measure it honestly |
+| 6 | **Kaggle Benchmarks** | Google/Kaggle's community eval platform (10k+ tasks, public leaderboards) + the new local workflow (`kaggle-cli`, `kaggle-benchmarks` SDK, `write-kaggle-benchmarks` skill); current model standings | A standardized external yardstick you can run locally/CI to evaluate models and drive the board with real numbers. Pulls a live **Kaggle leaderboard** onto the dashboard |
 
 Anchor questions per track live in `src/studies.js` (`TRACKS[].questions`) and render in the
 **Study plan** view.
@@ -38,8 +39,8 @@ One subject studied per weekday (UTC); Saturday synthesizes the week; Sunday idl
 | Wed | Claude + Tools |
 | Thu | Open Source |
 | Fri | Research |
-| Sat | **Synthesis** — cross-cutting "what changed this week and what to do about it" |
-| Sun | idle |
+| Sat | Kaggle Benchmarks — pulls current leaderboard standings onto the board |
+| Sun | **Synthesis** — cross-cutting "what changed this week and what to do about it" |
 
 Each run: a Claude `web_search` pass (primary sources preferred) → a sourced **finding** (headline,
 ≤120-word synthesis, 3–6 cited points) appended to the log → updated **benchmark scores** for that

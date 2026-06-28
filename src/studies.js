@@ -25,8 +25,8 @@ export const SCHEDULE = {
   3: "claude-tools",      // Wed
   4: "open-source",       // Thu
   5: "research",          // Fri
-  6: "synthesis",         // Sat — cross-cutting weekly synthesis
-  0: "idle",              // Sun — no run
+  6: "kaggle",            // Sat — Kaggle Benchmarks (external eval leaderboard)
+  0: "synthesis",         // Sun — cross-cutting weekly synthesis
 };
 
 const DAY_LABEL = { 0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat" };
@@ -117,6 +117,24 @@ export const TRACKS = [
       "What new techniques materially move agentic capability or cost-of-pass?",
       "Which benchmarks are credible, and which are saturated or gameable?",
       "What does the research say about harness design and process supervision?"
+    ]
+  },
+  {
+    id: "kaggle",
+    name: "Kaggle Benchmarks",
+    group: "eval",
+    goal: "Track Kaggle Benchmarks — Google/Kaggle's community AI-eval platform (10k+ tasks, public leaderboards) and its new local workflow (kaggle-cli benchmarks, the kaggle-benchmarks SDK, the write-kaggle-benchmarks skill): which evals matter, how to run them locally, and where the top models stand.",
+    why: "Standardized, community-trusted evals and leaderboards are an external yardstick for this whole benchmark — and 'build locally' means you can run the same evals in your own stack/CI to evaluate models and drive the board with real numbers.",
+    seedSources: [
+      "https://www.kaggle.com/benchmarks",
+      "https://github.com/Kaggle/kaggle-benchmarks",
+      "https://github.com/Kaggle/kaggle-cli/blob/main/docs/benchmarks.md",
+      "https://github.com/Kaggle/kaggle-skills"
+    ],
+    questions: [
+      "Which Kaggle benchmark tasks / leaderboards are most credible for reasoning, agentic, and coding capability?",
+      "How do you build, validate, run, and submit a benchmark task locally (kaggle-cli / kaggle-benchmarks SDK / the skill)?",
+      "Where do Claude and the other frontier models currently stand on the leaderboards?"
     ]
   }
 ];
@@ -304,6 +322,34 @@ export function studyTask(subjectId, { url, question } = {}) {
     );
   }
 
+  if (subjectId === "kaggle") {
+    const kaggleSchema =
+      '{\n' +
+      '  "headline": "one line, <=100 chars",\n' +
+      '  "summary": "<=120 words on what is new + how to run benchmarks locally + the leaderboard picture",\n' +
+      '  "findings": [{"text": "specific finding", "url": "https://source"}],\n' +
+      '  "leaderboard": [{"model": "...", "score": "e.g. 72.4 or rank #1", "benchmark": "task/leaderboard name", "url": "https://source"}]\n' +
+      '}';
+    return (
+      "You are studying Kaggle Benchmarks (https://www.kaggle.com/benchmarks) — Google/Kaggle's " +
+      "community AI-evaluation platform with public leaderboards — plus its new local workflow " +
+      "(the kaggle-cli benchmarks commands, the kaggle-benchmarks SDK, and the write-kaggle-benchmarks " +
+      "skill).\n\n" +
+      "Use web_search to find two things:\n" +
+      "  1. What's new and how to build / validate / run / submit a benchmark task locally " +
+      "(kaggle-cli, the kaggle-benchmarks SDK, the skill).\n" +
+      "  2. The CURRENT top standings on the most credible Kaggle leaderboards for reasoning, agentic, " +
+      "and coding capability — especially where Claude (Opus / Sonnet) and other frontier models rank.\n\n" +
+      "Cite a source URL for every finding and every leaderboard row. If exact standings aren't " +
+      "available, return the best sourced approximation and note the uncertainty in the summary.\n\n" +
+      (url ? `Also study this link in depth with web_fetch: ${url}\n\n` : "") +
+      (question ? `Operator question to prioritize: ${question}\n\n` : "") +
+      "End your reply with a single fenced ```json code block matching exactly:\n```json\n" +
+      kaggleSchema +
+      "\n```"
+    );
+  }
+
   const track = trackById(subjectId);
   const name = track ? track.name : subjectId;
   const goal = track ? track.goal : `Study ${subjectId}.`;
@@ -378,6 +424,13 @@ export function buildDigest(state, { maxFindings = 14 } = {}) {
       for (const p of (f.points || []).slice(0, 2)) {
         if (p && p.text) lines.push(`      • ${p.text}${p.url ? " (" + p.url + ")" : ""}`.slice(0, 280));
       }
+    }
+  }
+  const kb = state.kaggle && state.kaggle.leaderboard;
+  if (kb && kb.length) {
+    lines.push("", "KAGGLE LEADERBOARD (top standings, most recent pull):");
+    for (const row of kb.slice(0, 8)) {
+      lines.push(`  - ${row.model}: ${row.score}${row.benchmark ? " on " + row.benchmark : ""}`.slice(0, 200));
     }
   }
   if (!lines.length) lines.push("(no findings yet — scheduled study runs will populate this)");

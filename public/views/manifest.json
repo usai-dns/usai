@@ -2,6 +2,7 @@
   "views": [
     "chat.js",
     "benchmark.js",
+    "kaggle.js",
     "findings.js",
     "study-plan.js",
     "convergence.js",

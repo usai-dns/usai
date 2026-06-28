@@ -23,7 +23,7 @@ public/
   index.html            # the thin shell (served at /) — unchanged
   data/seed.json        # static canonical seed (experiments · results · discoveries · resources)
   views/manifest.json   # which views to load
-  views/{chat,benchmark,findings,study-plan,convergence,results-table}.js
+  views/{chat,benchmark,kaggle,findings,study-plan,convergence,results-table}.js
 wrangler.toml           # Worker + Static Assets + KV + cron
 ```
 
@@ -32,8 +32,10 @@ The full study plan and benchmark methodology are written up in **[STUDIES.md](.
 ## What it does
 
 - **Studies on a schedule.** A daily cron picks the day's subject (Mon→cloud, Tue→CLI,
-  Wed→tools, Thu→open-source, Fri→research, Sat→synthesis, Sun→idle), runs a Claude `web_search`
-  pass, and files a sourced finding plus updated benchmark scores into KV.
+  Wed→tools, Thu→open-source, Fri→research, Sat→Kaggle Benchmarks, Sun→synthesis), runs a Claude
+  `web_search` pass, and files a sourced finding plus updated benchmark scores into KV.
+- **Kaggle Benchmarks board.** The Kaggle track pulls current public-leaderboard standings onto
+  the dashboard — an external, standardized yardstick alongside the in-house benchmark.
 - **A commercial benchmark.** Five subjects — **Claude Code Cloud, Claude CLI, Claude + Tools,
   Open Source, Research** — scored on seven axes (autonomy, tool breadth, convergence,
   cost-of-pass, context/scale, deployability, ecosystem). Ships with seed estimates the worker

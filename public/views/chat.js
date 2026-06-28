@@ -8,7 +8,7 @@ HUB.registerView({
   title: "Chat · parse & steer the study",
   group: "interface",
   render(data, el) {
-    const subjects = (data && data.benchmark && data.benchmark.subjects) || [];
+    const tracks = (data && data.studies && data.studies.tracks) || [];
     const hasKey = !(data && data.meta) || data.meta.hasKey !== false;
 
     el.innerHTML = `
@@ -21,7 +21,7 @@ HUB.registerView({
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center;border-top:1px solid var(--line);padding-top:10px">
         <span class="vnote" style="margin:0">Study &amp; file →</span>
         <select id="usaiSubj" style="background:var(--ink-2);color:var(--paper);border:1px solid var(--line-2);border-radius:6px;padding:5px 8px;font-family:var(--mono);font-size:11px">
-          ${subjects.map((s) => `<option value="${s.id}">${s.name}</option>`).join("")}
+          ${tracks.map((t) => `<option value="${t.id}">${t.name}</option>`).join("")}
         </select>
         <input id="usaiUrl" placeholder="optional link to study (https://…)"
           style="flex:1;min-width:160px;background:var(--ink-2);color:var(--paper);border:1px solid var(--line-2);border-radius:6px;padding:6px 9px;font-family:var(--mono);font-size:11px" />
