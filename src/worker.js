@@ -1,40 +1,27 @@
-// worker.js — intellistudy's Cloudflare Worker.
+// worker.js — intellistudy v2: a collaborative AI-architecture lab in one Worker.
 //
-// It does two jobs:
-//   fetch()     — serves the dashboard's static assets, plus a small API:
-//                   GET  /data/state.json   merged canonical data (seed + live KV)
-//                   GET  /api/state         same as above (alias)
-//                   GET  /api/health        { ok, hasKey, lastRuns }
-//                   POST /api/chat          streaming chat over the corpus
-//                   POST /api/study/run     run + file a study now (manual trigger)
-//   scheduled() — on the cron, studies the day's subject and writes a finding +
-//                 updated benchmark scores into KV.
+//   fetch()
+//     GET  /api/health              { ok, hasKey, kv, queue, counts }
+//     GET  /api/state               sidebar indexes (threads/studies/benchmarks) — also
+//                                   lazily migrates v1 research into a study once
+//     GET  /api/threads             thread index          GET /api/thread/:id    full thread
+//     POST /api/thread              create a thread
+//     POST /api/chat                {threadId?, message} → NDJSON agent stream (the tool)
+//     GET  /api/studies             study index           GET /api/study/:id     full study
+//     GET  /api/benchmarks          bench index           GET /api/bench/:id     full bench + runs
+//     POST /api/bench/run           {id} → NDJSON: progress lines + final measured run
+//     POST /api/bench/queue         {id} → queued for the nightly cron
+//     everything else               static assets (the chat workbench UI)
 //
-// The thin-shell contract is preserved: index.html is never edited. New data
-// (studies, benchmark, findings) is merged into /data/state.json so existing and
-// generated views render it; new visualizations ship as generated views/*.js.
+//   scheduled()                     drains the run queue (bigger call budget)
 //
-// State persists in KV (binding USAI_KV). Live research/chat needs the secret
-// ANTHROPIC_API_KEY; without it the dashboard + framework still render and the
-// API returns clear setup guidance.
+// Optional shared-secret gate: set the ACCESS_TOKEN secret and every /api/* route
+// (except /api/health) requires the x-usai-key header (or ?key=). This matters
+// because chat and runs spend YOUR Anthropic tokens.
 
-import {
-  STUDY_PLAN,
-  BENCHMARK,
-  SEED_FINDINGS,
-  subjectForDate,
-  subjectName,
-  studyTask,
-  chatSystem,
-  buildDigest
-} from "./studies.js";
-import { runStudy, streamChat, hasKey, MODEL } from "./anthropic.js";
-
-const FINDINGS_KEY = "findings";
-const SCORES_KEY = "scores";
-const LASTRUNS_KEY = "lastRuns";
-const KAGGLE_KEY = "kaggle";
-const MAX_FINDINGS = 200;
+import * as store from "./store.js";
+import { runBenchmark, summarizeRun } from "./lab.js";
+import { chatStream, hasKey, CHAT_MODEL } from "./agent.js";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data, null, 2), {
@@ -42,249 +29,20 @@ const json = (data, status = 200) =>
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
   });
 
-// ── KV helpers (all guard a missing binding so dev/preview never hard-fails) ──
-async function kvGet(env, key, fallback) {
-  if (!env.USAI_KV) return fallback;
-  try {
-    const v = await env.USAI_KV.get(key, "json");
-    return v ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-async function kvPut(env, key, value) {
-  if (!env.USAI_KV) return;
-  try {
-    await env.USAI_KV.put(key, JSON.stringify(value));
-  } catch {
-    /* best-effort */
-  }
+const ndjsonHeaders = {
+  "content-type": "application/x-ndjson; charset=utf-8",
+  "cache-control": "no-store",
+  "x-accel-buffering": "no"
+};
+
+function authorized(env, request, url) {
+  if (!env.ACCESS_TOKEN) return true;
+  const supplied = request.headers.get("x-usai-key") || url.searchParams.get("key") || "";
+  return supplied === env.ACCESS_TOKEN;
 }
 
-// Overlay live KV scores on top of the seed scores.
-function mergeScores(liveScores) {
-  const merged = JSON.parse(JSON.stringify(BENCHMARK.seedScores));
-  for (const [subject, axes] of Object.entries(liveScores || {})) {
-    merged[subject] = merged[subject] || {};
-    for (const [axis, val] of Object.entries(axes || {})) {
-      merged[subject][axis] = { ...val, seed: false };
-    }
-  }
-  return merged;
-}
-
-// Fetch the static seed (experiments/results/discoveries/resources) via the
-// assets binding, then merge in the study framework + live KV data.
-async function buildState(env, request) {
-  let base = {};
-  try {
-    const res = await env.ASSETS.fetch(new Request(new URL("/data/seed.json", request.url)));
-    if (res.ok) base = await res.json();
-  } catch {
-    /* seed missing — render framework only */
-  }
-
-  const [liveScores, liveFindings, lastRuns, kaggle] = await Promise.all([
-    kvGet(env, SCORES_KEY, {}),
-    kvGet(env, FINDINGS_KEY, []),
-    kvGet(env, LASTRUNS_KEY, {}),
-    kvGet(env, KAGGLE_KEY, null)
-  ]);
-
-  const findings = [...liveFindings, ...SEED_FINDINGS];
-
-  return {
-    ...base,
-    studies: STUDY_PLAN,
-    benchmark: {
-      axes: BENCHMARK.axes,
-      subjects: BENCHMARK.subjects,
-      scale: BENCHMARK.scale,
-      scores: mergeScores(liveScores)
-    },
-    kaggle,
-    findings,
-    meta: {
-      generated: new Date().toISOString(),
-      hasKey: hasKey(env),
-      mode: env.USAI_KV ? "live" : "ephemeral",
-      lastRuns,
-      model: MODEL
-    }
-  };
-}
-
-// Run a study pass and persist the finding + score updates.
-async function runAndPersist(env, { subjectId, url, question, trigger, effort, maxSearch, maxFetch, maxLoops }) {
-  const task = studyTask(subjectId, { url, question });
-  const result = await runStudy(env, { subjectId, task, effort, maxSearch, maxFetch, maxLoops });
-  if (!result.ok) return result;
-
-  const finding = {
-    id: crypto.randomUUID(),
-    subject: subjectId,
-    subjectName: subjectName(subjectId),
-    ts: new Date().toISOString(),
-    headline: result.headline || result.summary.slice(0, 100),
-    summary: result.summary,
-    points: (result.findings || []).map((f) => ({
-      text: (f.text || "").toString(),
-      url: (f.url || "").toString()
-    })),
-    model: MODEL,
-    trigger: trigger || "manual"
-  };
-
-  // Append finding (newest first, capped).
-  const findings = await kvGet(env, FINDINGS_KEY, []);
-  findings.unshift(finding);
-  await kvPut(env, FINDINGS_KEY, findings.slice(0, MAX_FINDINGS));
-
-  // Update scores for this subject (synthesis returns none).
-  if (result.scores && Object.keys(result.scores).length && subjectId !== "synthesis") {
-    const scores = await kvGet(env, SCORES_KEY, {});
-    scores[subjectId] = scores[subjectId] || {};
-    for (const [axis, val] of Object.entries(result.scores)) {
-      const score = typeof val === "object" ? val.score : val;
-      const note = typeof val === "object" ? val.note || "" : "";
-      if (typeof score === "number") {
-        scores[subjectId][axis] = {
-          score,
-          note,
-          source: (finding.points[0] && finding.points[0].url) || null,
-          ts: finding.ts
-        };
-      }
-    }
-    await kvPut(env, SCORES_KEY, scores);
-  }
-
-  // Kaggle runs also produce a leaderboard snapshot that drives its own board view.
-  if (subjectId === "kaggle" && Array.isArray(result.leaderboard) && result.leaderboard.length) {
-    await kvPut(env, KAGGLE_KEY, {
-      leaderboard: result.leaderboard.map((r) => ({
-        model: String(r.model || ""),
-        score: String(r.score ?? ""),
-        benchmark: String(r.benchmark || r.task || ""),
-        url: String(r.url || "")
-      })),
-      headline: finding.headline,
-      updated: finding.ts,
-      source: (finding.points[0] && finding.points[0].url) || null
-    });
-  }
-
-  // Record last-run time.
-  const lastRuns = await kvGet(env, LASTRUNS_KEY, {});
-  lastRuns[subjectId] = finding.ts;
-  await kvPut(env, LASTRUNS_KEY, lastRuns);
-
-  return { ok: true, finding };
-}
-
-// ───────────────────────────── HTTP handlers ─────────────────────────────────
-async function handleChat(env, request) {
-  const noKey = !hasKey(env);
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return json({ error: "invalid JSON body" }, 400);
-  }
-  const messages = Array.isArray(body.messages) ? body.messages : null;
-  if (!messages || !messages.length) return json({ error: "messages[] required" }, 400);
-
-  if (noKey) {
-    return new Response(
-      "⚠️ Chat is not configured yet.\n\nSet the ANTHROPIC_API_KEY secret to enable the " +
-        "Claude-powered chat and autonomous study:\n  • local: put ANTHROPIC_API_KEY=sk-... in .dev.vars\n" +
-        "  • cloud: npx wrangler secret put ANTHROPIC_API_KEY\n\nThe dashboard, study plan, and " +
-        "benchmark framework work without a key — only live research and chat need it.",
-      { headers: { "content-type": "text/plain; charset=utf-8", "x-usai-status": "no-key" } }
-    );
-  }
-
-  // Give the assistant the current corpus as context.
-  const state = await buildState(env, request);
-  const system = chatSystem(buildDigest(state));
-
-  // If a link was supplied, make sure it's in the conversation for web_fetch.
-  const studyUrl = typeof body.studyUrl === "string" && body.studyUrl.trim() ? body.studyUrl.trim() : null;
-  if (studyUrl) {
-    const last = messages[messages.length - 1];
-    if (last && last.role === "user") {
-      const txt = typeof last.content === "string" ? last.content : "";
-      last.content = `${txt}\n\n[Study this link with web_fetch: ${studyUrl}]`;
-    }
-  }
-
-  const stream = streamChat(env, { system, messages, studyUrl });
-  return new Response(stream, {
-    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-usai-status": "ok" }
-  });
-}
-
-// Wrap a long-running study promise in a streamed response: flush headers and a
-// heartbeat immediately (and every ~12s) so Cloudflare's ~100s edge timeout never
-// fires, then emit the final JSON (finding or error) as the last line. Heartbeats
-// are whitespace, so the client just trims and parses the body.
-function studyStream(runPromise) {
-  const enc = new TextEncoder();
-  return new ReadableStream({
-    async start(controller) {
-      controller.enqueue(enc.encode(" \n")); // flush response headers right away
-      const hb = setInterval(() => {
-        try {
-          controller.enqueue(enc.encode(" "));
-        } catch {
-          /* controller may be closed */
-        }
-      }, 12000);
-      let payload;
-      try {
-        const r = await runPromise;
-        payload = r.ok ? r.finding : { error: r.reason || "study-failed", detail: r.detail };
-      } catch (e) {
-        payload = { error: "study-failed", detail: e?.message || String(e) };
-      } finally {
-        clearInterval(hb);
-      }
-      controller.enqueue(enc.encode("\n" + JSON.stringify(payload)));
-      controller.close();
-    }
-  });
-}
-
-// On-demand study. A run's web-search latency is variable (often >100s), which
-// overruns Cloudflare's edge response timeout for a normal request — so we STREAM
-// the response (heartbeats keep it alive) and return the finding when it lands.
-// Budget stays modest (low effort, <=2 searches) to keep total duration sane;
-// thorough multi-search runs happen on the cron (15-min budget).
-async function handleStudyRun(env, request) {
-  if (!hasKey(env)) return json({ error: "no-key", detail: "Set ANTHROPIC_API_KEY to run studies." }, 400);
-  let body = {};
-  try {
-    body = await request.json();
-  } catch {
-    /* empty body is fine */
-  }
-  const subjectId = (body.subject && String(body.subject)) || subjectForDate();
-  const subj = subjectId === "idle" ? "claude-code-cloud" : subjectId; // never study 'idle'
-
-  const runPromise = runAndPersist(env, {
-    subjectId: subj,
-    url: body.url ? String(body.url) : undefined,
-    question: body.question ? String(body.question) : undefined,
-    trigger: "manual",
-    effort: "low",
-    maxSearch: 2,
-    maxFetch: 2,
-    maxLoops: 2
-  });
-
-  return new Response(studyStream(runPromise), {
-    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "x-usai-status": "ok" }
-  });
+async function readBody(request) {
+  try { return await request.json(); } catch { return {}; }
 }
 
 export default {
@@ -292,54 +50,120 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
 
-    if (pathname === "/data/state.json" || pathname === "/api/state") {
-      return json(await buildState(env, request));
-    }
+    if (!pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
+
     if (pathname === "/api/health") {
       return json({
         ok: true,
         hasKey: hasKey(env),
-        model: MODEL,
         kv: Boolean(env.USAI_KV),
-        lastRuns: await kvGet(env, LASTRUNS_KEY, {}),
-        todaysSubject: subjectForDate()
+        model: CHAT_MODEL,
+        gated: Boolean(env.ACCESS_TOKEN),
+        queue: await store.queueLength(env)
       });
     }
-    if (pathname === "/api/chat" && request.method === "POST") {
-      return handleChat(env, request);
-    }
-    if (pathname === "/api/study/run" && request.method === "POST") {
-      return handleStudyRun(env, request);
+
+    if (!authorized(env, request, url)) {
+      return json({ error: "unauthorized", detail: "provide the shared key via the x-usai-key header (set as the ACCESS_TOKEN secret)" }, 401);
     }
 
-    // Everything else is a static asset (the shell, views, seed.json, …).
-    return env.ASSETS.fetch(request);
+    // ── library state ──
+    if (pathname === "/api/state") {
+      await store.migrateV1(env); // one-time: fold v1 findings/kaggle pull into a study
+      const [threads, studies, benches, queue] = await Promise.all([
+        store.listThreads(env), store.listStudies(env), store.listBenches(env), store.queueLength(env)
+      ]);
+      return json({ threads, studies, benchmarks: benches, queue, hasKey: hasKey(env), model: CHAT_MODEL });
+    }
+
+    // ── threads ──
+    if (pathname === "/api/threads") return json(await store.listThreads(env));
+    if (pathname.startsWith("/api/thread/")) {
+      const t = await store.getThread(env, pathname.split("/").pop());
+      return t ? json(t) : json({ error: "not found" }, 404);
+    }
+    if (pathname === "/api/thread" && request.method === "POST") {
+      const body = await readBody(request);
+      return json(await store.createThread(env, body.title));
+    }
+
+    // ── chat (the tool itself) ──
+    if (pathname === "/api/chat" && request.method === "POST") {
+      if (!hasKey(env)) return json({ error: "no-key", detail: "Set the ANTHROPIC_API_KEY secret." }, 400);
+      const body = await readBody(request);
+      const message = (body.message || "").toString().trim();
+      if (!message) return json({ error: "message required" }, 400);
+      let thread = body.threadId ? await store.getThread(env, String(body.threadId)) : null;
+      if (!thread) thread = await store.createThread(env, message.slice(0, 90));
+      return new Response(chatStream(env, { thread, userText: message }), { headers: ndjsonHeaders });
+    }
+
+    // ── studies ──
+    if (pathname === "/api/studies") return json(await store.listStudies(env));
+    if (pathname.startsWith("/api/study/")) {
+      const s = await store.getStudy(env, pathname.split("/").pop());
+      return s ? json(s) : json({ error: "not found" }, 404);
+    }
+
+    // ── benchmarks ──
+    if (pathname === "/api/benchmarks") return json(await store.listBenches(env));
+    if (pathname.startsWith("/api/bench/") && request.method === "GET") {
+      const b = await store.getBench(env, pathname.split("/").pop());
+      return b ? json(b) : json({ error: "not found" }, 404);
+    }
+    if (pathname === "/api/bench/queue" && request.method === "POST") {
+      const body = await readBody(request);
+      const bench = await store.getBench(env, String(body.id || ""));
+      if (!bench) return json({ error: "not found" }, 404);
+      const n = await store.queuePush(env, bench.id);
+      return json({ ok: true, queue: n });
+    }
+    if (pathname === "/api/bench/run" && request.method === "POST") {
+      if (!hasKey(env)) return json({ error: "no-key", detail: "Set the ANTHROPIC_API_KEY secret." }, 400);
+      const body = await readBody(request);
+      const bench = await store.getBench(env, String(body.id || ""));
+      if (!bench) return json({ error: "not found" }, 404);
+      // NDJSON stream: progress heartbeats keep the connection alive, then the run.
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const emit = (obj) => controller.enqueue(enc.encode(JSON.stringify(obj) + "\n"));
+          try {
+            emit({ t: "progress", s: `running "${bench.name}"…` });
+            const run = await runBenchmark(env, bench, { onProgress: (s) => emit({ t: "progress", s }), callCap: 30 });
+            await store.addRun(env, bench.id, run);
+            emit({ t: "artifact", kind: "bench", id: bench.id });
+            emit({ t: "run", run: { ...run, cells: undefined }, summary: summarizeRun(bench, run) });
+          } catch (e) {
+            emit({ t: "error", s: (e?.message || String(e)).slice(0, 300) });
+          } finally {
+            emit({ t: "done" });
+            controller.close();
+          }
+        }
+      });
+      return new Response(stream, { headers: ndjsonHeaders });
+    }
+
+    return json({ error: "not found" }, 404);
   },
 
-  // Cron: study the day's subject and file the result. Awaited directly so the
-  // runtime keeps the invocation alive until it resolves (up to 15 min) — unlike
-  // a fetch handler's waitUntil, scheduled invocations wait for the returned
-  // promise. Higher effort here since there's budget.
+  // Cron: drain the benchmark run queue with a bigger budget (scheduled
+  // invocations get ~15 minutes; awaited directly so the runtime waits).
   async scheduled(controller, env, ctx) {
-    const subjectId = subjectForDate(new Date());
-    if (subjectId === "idle") return; // Sunday — rest
-    if (!hasKey(env)) {
-      console.log("[scheduled] skipped: ANTHROPIC_API_KEY not set");
-      return;
-    }
-    try {
-      // Thorough budget — a scheduled invocation has a 15-minute window.
-      const r = await runAndPersist(env, {
-        subjectId,
-        trigger: "scheduled",
-        effort: "high",
-        maxSearch: 4,
-        maxFetch: 3,
-        maxLoops: 4
-      });
-      console.log(`[scheduled] ${subjectId}:`, r.ok ? "filed" : r.reason, r.detail || "");
-    } catch (e) {
-      console.log(`[scheduled] ${subjectId} error:`, e?.message || e);
+    if (!hasKey(env)) { console.log("[cron] skipped: no ANTHROPIC_API_KEY"); return; }
+    for (let i = 0; i < 2; i++) {
+      const item = await store.queuePop(env);
+      if (!item) { if (i === 0) console.log("[cron] queue empty"); return; }
+      const bench = await store.getBench(env, item.benchId);
+      if (!bench) { console.log(`[cron] bench ${item.benchId} missing`); continue; }
+      try {
+        const run = await runBenchmark(env, bench, { onProgress: (s) => console.log("[cron]", s), callCap: 60 });
+        await store.addRun(env, bench.id, run);
+        console.log("[cron]", summarizeRun(bench, run).split("\n")[0]);
+      } catch (e) {
+        console.log(`[cron] run of ${bench.id} failed:`, e?.message || e);
+      }
     }
   }
 };

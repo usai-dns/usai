@@ -1,4 +1,6 @@
-# Copy to .dev.vars (gitignored) and fill in to enable live chat + autonomous study
-# locally. Without it, the dashboard / study plan / benchmark framework still render;
-# only Claude-powered research and chat are disabled.
+# Copy to .dev.vars (gitignored) for local dev.
+# Required — enables chat + benchmark runs (they call the Anthropic API):
 ANTHROPIC_API_KEY=sk-ant-...
+# Optional — when set, /api/* requires this value in the x-usai-key header.
+# Strongly recommended in production: chat and runs spend your tokens.
+# ACCESS_TOKEN=choose-a-shared-secret

@@ -1,156 +1,416 @@
+<!doctype html>
 <!--
-  intellistudy — hub (thin shell), served at /
-  Responsibilities, and ONLY these two:
-    1. Render the canonical data layer (experiments · results · discoveries · resources) — static, organized, inspectable.
-    2. Load generated view-components from views/ (listed in views/manifest.json) and host them.
-  It has NO hardcoded analytics. To add a way to see something, the agent GENERATES a
-  views/*.js file that calls HUB.registerView({id,title,group,render(data,el)}) and adds it
-  to views/manifest.json. Never extend this shell with features — extend by generating views.
-
-  Data contract: data/state.json holds canonical data the agent writes. The shell only reads it.
-  Served by a Cloudflare Worker (Static Assets) — locally via `wrangler dev` (Docker) or any
-  static server. Opened as a bare file with no server, it falls back to embedded sample data +
-  two inline example views so you can still see the pattern.
+  intellistudy · lab — the chat-first workbench (v2).
+  One page, no build step. The chat operates the lab (studies, benchmarks, runs)
+  through /api/chat (NDJSON agent stream). The sidebar lists the shared library;
+  the right panel opens any artifact: study notes, or a benchmark's spec + its
+  MEASURED run metrics (pass rate, tokens, $, cost-of-pass, latency, convergence,
+  leverage). Benchmarks can be run/queued from the panel or from chat.
 -->
+<html lang="en">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>intellistudy · lab</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;450;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;450;500;600&display=swap');
   :root{--ink:#0F141B;--ink-2:#0C1117;--panel:#161D27;--line:#27313F;--line-2:#33414f;--paper:#E9E7DF;--muted:#8C99A8;--faint:#5C6877;--signal:#E8A33D;--converge:#5FB3A3;--thrash:#D8694B;--cool:#6E9BD1;--disp:'Space Grotesk',system-ui,sans-serif;--body:'Inter',system-ui,sans-serif;--mono:'IBM Plex Mono',ui-monospace,monospace}
-  *{box-sizing:border-box} html,body{margin:0;min-height:100%}
-  body{background:radial-gradient(1100px 560px at 82% -12%,#15202c 0%,transparent 60%),var(--ink);color:var(--paper);font-family:var(--body);font-size:14px;-webkit-font-smoothing:antialiased}
-  .bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;padding:14px 24px;background:rgba(15,20,27,.85);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:radial-gradient(1100px 560px at 82% -12%,#15202c 0%,transparent 60%),var(--ink);color:var(--paper);font-family:var(--body);font-size:14px;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column}
+  a{color:var(--cool)}
+  .bar{display:flex;align-items:center;gap:12px;padding:12px 20px;background:rgba(15,20,27,.9);border-bottom:1px solid var(--line);flex:none}
   .bar .mk{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--signal);padding:2px 6px;border-radius:3px;font-weight:600}
   .bar h1{font-family:var(--disp);font-size:15px;margin:0;font-weight:600}
   .bar .sub{font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:.12em;text-transform:uppercase}
   .bar .status{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint)}
   .bar .status b{color:var(--converge);font-weight:500}
-  .body{display:grid;grid-template-columns:300px 1fr;gap:0;align-items:start}
-  @media(max-width:820px){.body{grid-template-columns:1fr}}
-  .inspect{border-right:1px solid var(--line);padding:20px;min-height:calc(100vh - 50px)}
-  .views{padding:20px 24px}
-  .eyebrow{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--signal);margin:0 0 10px}
-  .eyebrow.cool{color:var(--cool)}
-  .blk{margin-bottom:22px}
-  .blk h4{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:0 0 8px;border-bottom:1px solid var(--line);padding-bottom:6px}
-  .reg{display:flex;flex-direction:column;gap:6px}
-  .item{display:flex;align-items:baseline;gap:8px;font-size:12px}
-  .item .id{font-family:var(--mono);font-size:10px;color:var(--signal);min-width:26px}
-  .item .nm{color:var(--paper)} .item .mt{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint)}
-  .chips{display:flex;flex-wrap:wrap;gap:6px}
-  .chip{font-family:var(--mono);font-size:10.5px;padding:4px 8px;border:1px solid var(--line-2);border-radius:6px;color:var(--muted)}
-  .disc{font-size:12px;color:var(--muted);padding:6px 0;border-top:1px solid var(--line)}
-  .disc b{color:var(--paper);font-weight:500}
-  .disc .tag{font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.06em}
-  .vcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
-  .vcard .vh{display:flex;align-items:center;gap:8px;margin-bottom:12px}
-  .vcard .vh .t{font-family:var(--disp);font-size:14px;font-weight:600}
-  .vcard .vh .g{margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);border:1px solid var(--line-2);padding:2px 7px;border-radius:999px}
-  .vnote{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:8px}
-  table.vt{width:100%;border-collapse:collapse;font-size:12px}
-  table.vt th{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;padding:0 10px 7px 0;border-bottom:1px solid var(--line)}
-  table.vt td{font-family:var(--mono);padding:7px 10px 7px 0;border-bottom:1px solid var(--line);color:var(--muted)}
-  .empty{font-family:var(--mono);font-size:12px;color:var(--faint);border:1px dashed var(--line-2);border-radius:8px;padding:20px;text-align:center}
-  .contract{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:18px;line-height:1.7;border-top:1px solid var(--line);padding-top:14px}
-  .contract code{color:var(--cool)}
+  .app{flex:1;display:grid;grid-template-columns:290px 1fr;min-height:0}
+  @media(max-width:900px){.app{grid-template-columns:1fr}.side{display:none}}
+
+  /* ── sidebar ── */
+  .side{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  .tabs{display:flex;border-bottom:1px solid var(--line);flex:none}
+  .tab{flex:1;padding:10px 4px;text-align:center;font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);cursor:pointer;border-bottom:2px solid transparent}
+  .tab.on{color:var(--signal);border-bottom-color:var(--signal)}
+  .side .actions{padding:10px 12px;flex:none}
+  .btn{background:transparent;color:var(--cool);border:1px solid var(--line-2);border-radius:6px;padding:6px 12px;font-family:var(--mono);font-size:11px;cursor:pointer}
+  .btn:hover{border-color:var(--cool)}
+  .btn.primary{background:var(--signal);color:var(--ink);border:0;font-weight:600}
+  .btn:disabled{opacity:.45;cursor:default}
+  .list{overflow:auto;flex:1;padding:0 8px 12px}
+  .item{padding:9px 10px;border-radius:8px;cursor:pointer;margin-bottom:2px}
+  .item:hover{background:var(--panel)}
+  .item.on{background:var(--panel);outline:1px solid var(--line-2)}
+  .item .t{font-size:12.5px;color:var(--paper);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item .m{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin-top:3px}
+
+  /* ── chat ── */
+  .main{display:flex;flex-direction:column;min-height:0;min-width:0}
+  .chat{flex:1;overflow:auto;padding:22px 0}
+  .chat-inner{max-width:860px;margin:0 auto;padding:0 22px;display:flex;flex-direction:column;gap:14px}
+  .msg{max-width:92%;line-height:1.55;font-size:13.5px;white-space:normal;word-wrap:break-word}
+  .msg.user{align-self:flex-end;background:var(--line);border:1px solid var(--line-2);border-radius:12px 12px 3px 12px;padding:10px 14px}
+  .msg.assistant{align-self:flex-start;width:92%}
+  .msg.assistant .body{background:var(--panel);border:1px solid var(--line);border-radius:3px 12px 12px 12px;padding:12px 15px}
+  .sys{align-self:flex-start;font-family:var(--mono);font-size:10.5px;color:var(--faint);padding:0 4px}
+  .sys.err{color:var(--thrash)}
+  .sys .nm{color:var(--cool)}
+  .md p{margin:.45em 0} .md p:first-child{margin-top:0} .md p:last-child{margin-bottom:0}
+  .md code{font-family:var(--mono);font-size:12px;background:var(--ink-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  .md pre{background:var(--ink-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow:auto}
+  .md pre code{background:none;border:0;padding:0}
+  .md ul,.md ol{margin:.4em 0;padding-left:20px}
+  .md h1,.md h2,.md h3{font-family:var(--disp);font-size:14px;margin:.7em 0 .3em}
+  .md table{border-collapse:collapse;font-size:12px;font-family:var(--mono);margin:.5em 0}
+  .md th,.md td{border:1px solid var(--line);padding:4px 8px;text-align:left}
+  .md th{color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.06em}
+  .empty{margin:auto;text-align:center;color:var(--faint);font-family:var(--mono);font-size:12px;line-height:2;max-width:520px;padding:30px}
+  .empty b{color:var(--muted)}
+  .composer{flex:none;border-top:1px solid var(--line);padding:14px 22px;background:rgba(15,20,27,.9)}
+  .composer .row{max-width:860px;margin:0 auto;display:flex;gap:10px}
+  textarea{flex:1;resize:none;background:var(--ink-2);color:var(--paper);border:1px solid var(--line-2);border-radius:10px;padding:11px 13px;font-family:var(--body);font-size:13.5px;min-height:48px;max-height:180px;line-height:1.5}
+  textarea:focus{outline:none;border-color:var(--cool)}
+  .hint{max-width:860px;margin:6px auto 0;font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+
+  /* ── artifact panel ── */
+  .panel{position:fixed;top:0;right:0;bottom:0;width:min(560px,92vw);background:var(--ink-2);border-left:1px solid var(--line);transform:translateX(102%);transition:transform .18s ease;display:flex;flex-direction:column;z-index:20;box-shadow:-18px 0 40px rgba(0,0,0,.4)}
+  .panel.open{transform:none}
+  .panel .ph{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line);flex:none}
+  .panel .ph .t{font-family:var(--disp);font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .panel .ph .x{margin-left:auto;cursor:pointer;color:var(--faint);font-size:18px;padding:2px 8px}
+  .panel .pc{overflow:auto;flex:1;padding:16px 18px}
+  .kv{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin:2px 0 12px}
+  .note{border-top:1px solid var(--line);padding:12px 0}
+  .note .nt{color:var(--paper);font-weight:500;font-size:13px}
+  .note .nm{font-family:var(--mono);font-size:9.5px;color:var(--faint);margin:3px 0 7px}
+  .note .nc{font-size:12.5px;color:var(--muted);line-height:1.55}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{font-family:var(--mono);font-size:9.5px;padding:3px 7px;border:1px solid var(--line-2);border-radius:6px;color:var(--muted);text-decoration:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  table.vt{width:100%;border-collapse:collapse;font-size:11.5px;font-family:var(--mono);margin:8px 0}
+  table.vt th{font-size:9px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);text-align:left;padding:0 8px 6px 0;border-bottom:1px solid var(--line)}
+  table.vt td{padding:6px 8px 6px 0;border-bottom:1px solid var(--line);color:var(--muted);vertical-align:top}
+  .good{color:var(--converge);font-weight:600}.bad{color:var(--thrash)}.hi{color:var(--paper)}
+  .runlog{font-family:var(--mono);font-size:10.5px;color:var(--faint);background:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px;max-height:160px;overflow:auto;white-space:pre-wrap}
+  .sect{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--signal);margin:16px 0 6px}
+  select{background:var(--ink-2);color:var(--paper);border:1px solid var(--line-2);border-radius:6px;padding:5px 8px;font-family:var(--mono);font-size:11px}
 </style>
 
 <div class="bar">
-  <span class="mk">IS</span><div><h1>intellistudy · hub</h1><div class="sub">thin shell · data + generated views</div></div>
-  <div class="status" id="status">booting…</div>
+  <span class="mk">IS</span>
+  <div><h1>intellistudy · lab</h1><div class="sub">studies · benchmarks · measured architecture decisions</div></div>
+  <div class="status" id="status">connecting…</div>
 </div>
-<div class="body">
-  <aside class="inspect">
-    <p class="eyebrow">Canonical data · inspect</p>
-    <div class="blk"><h4>Experiments</h4><div class="reg" id="cExp"></div></div>
-    <div class="blk"><h4>Results</h4><div class="reg" id="cRes"></div></div>
-    <div class="blk"><h4>Discoveries</h4><div id="cDisc"></div></div>
-    <div class="blk"><h4>Resources</h4><div id="cResrc"></div></div>
-    <div class="contract">
-      add a view → write <code>views/name.js</code> calling <code>HUB.registerView(&#123;id,title,group,render(data,el)&#125;)</code>, then list it in <code>views/manifest.json</code>. don't edit this shell.
+
+<div class="app">
+  <aside class="side">
+    <div class="tabs">
+      <div class="tab on" data-tab="threads">Threads</div>
+      <div class="tab" data-tab="studies">Studies</div>
+      <div class="tab" data-tab="benchmarks">Benchmarks</div>
     </div>
+    <div class="actions"><button class="btn" id="newThread">+ new thread</button></div>
+    <div class="list" id="list"></div>
   </aside>
-  <main class="views">
-    <p class="eyebrow cool">Views · generated</p>
-    <div id="viewHost"></div>
+
+  <main class="main">
+    <div class="chat" id="chat">
+      <div class="chat-inner" id="chatInner">
+        <div class="empty" id="emptyState">
+          <b>This chat runs the lab.</b><br/>
+          paste a link → it's studied and filed with sources<br/>
+          ask for research → searched, distilled, saved to a study<br/>
+          "compare X vs Y on Z" → it designs a benchmark, you approve, it <b>runs for real</b><br/>
+          results are measured: pass-rate · tokens · $ · cost-of-pass · convergence · leverage<br/>
+          "what should I deploy?" → recommendations grounded in your saved runs
+        </div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="row">
+        <textarea id="input" placeholder="Ask, paste a link, or describe an experiment…"></textarea>
+        <button class="btn primary" id="send" style="align-self:stretch;padding:0 18px">Send</button>
+      </div>
+      <div class="hint">Enter to send · Shift+Enter for a newline · everything here is saved to the shared thread</div>
+    </div>
   </main>
 </div>
 
+<div class="panel" id="panel">
+  <div class="ph"><span class="t" id="panelTitle"></span><span class="x" id="panelClose">×</span></div>
+  <div class="pc" id="panelBody"></div>
+</div>
+
 <script>
-const HUB = { data:null, _views:[], registerView(v){ this._views.push(v); } };
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { tab: "threads", threads: [], studies: [], benchmarks: [], threadId: null, busy: false, panel: null };
 
-const EMBEDDED = {
-  experiments:[
-    {id:'V0',name:'Instrument calibration',vary:'model',measure:'result',status:'planned'},
-    {id:'A1',name:'Model-profile comparison',vary:'model',measure:'result',status:'planned'},
-    {id:'C1',name:'Runtime cost spread',vary:'runtime',measure:'cost',status:'idea'}
-  ],
-  results:[
-    {exp:'V0',varied:'fable-5',cost:0.42,outcome:'pass',time:12},
-    {exp:'V0',varied:'claude-opus-4-8',cost:0.55,outcome:'pass',time:15},
-    {exp:'V0',varied:'qwen2.5-coder',cost:0.03,outcome:'fail',time:31}
-  ],
-  discoveries:[
-    {id:'D1',statement:'Harness is a multiplier with a ceiling set by the base model.',status:'established'},
-    {id:'D2',statement:'Harness = inference-time process supervision.',status:'inference'}
-  ],
-  resources:{ datasets:['SWE-bench Verified bucket','nebius 80k','your Claude/Fable logs'], models:['claude-opus-4-8','fable-5','gpt-5','qwen2.5-coder'] }
-};
+  // ── auth (optional shared key) ──
+  const KEY_LS = "usai_key";
+  function headers(extra) {
+    const h = Object.assign({ "content-type": "application/json" }, extra || {});
+    const k = localStorage.getItem(KEY_LS);
+    if (k) h["x-usai-key"] = k;
+    return h;
+  }
+  async function api(path, opts) {
+    const res = await fetch(path, Object.assign({ headers: headers() }, opts || {}));
+    if (res.status === 401) {
+      const k = prompt("This lab is gated. Enter the shared access key:");
+      if (k) { localStorage.setItem(KEY_LS, k); return api(path, opts); }
+      throw new Error("unauthorized");
+    }
+    return res;
+  }
 
-function renderCanonical(d){
-  document.getElementById('cExp').innerHTML = (d.experiments||[]).map(e=>
-    `<div class="item"><span class="id">${e.id}</span><span class="nm">${e.name}</span><span class="mt">vary ${e.vary}</span></div>`).join('');
-  document.getElementById('cRes').innerHTML = (d.results||[]).map(r=>
-    `<div class="item"><span class="id">${r.exp}</span><span class="nm">${r.varied}</span><span class="mt" style="color:${r.outcome==='pass'?'var(--converge)':'var(--thrash)'}">${r.outcome} · $${(r.cost??0).toFixed(2)}</span></div>`).join('') || '<div class="vnote">none yet</div>';
-  const sclr={established:'var(--converge)',inference:'var(--signal)',speculation:'var(--thrash)',observation:'var(--cool)'};
-  document.getElementById('cDisc').innerHTML = (d.discoveries||[]).map(x=>
-    `<div class="disc"><b>${x.id}</b> ${x.statement} <span class="tag" style="color:${sclr[x.status]||'var(--muted)'}">${x.status}</span></div>`).join('');
-  const r=d.resources||{};
-  document.getElementById('cResrc').innerHTML =
-    `<div class="chips">${[...(r.datasets||[]),...(r.models||[])].map(x=>`<span class="chip">${x}</span>`).join('')}</div>`;
-}
+  // ── tiny markdown (escape first, then transform) ──
+  function esc(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function mdInline(s) {
+    return s
+      .replace(/`([^`]+)`/g, (_, c) => "<code>" + c + "</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/(^|[\s(])((?:https?:\/\/)[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  }
+  function md(src) {
+    const lines = esc(src || "").split("\n");
+    let html = "", inCode = false, inList = false;
+    const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
+    for (const line of lines) {
+      if (line.trim().startsWith("```")) { closeList(); html += inCode ? "</code></pre>" : "<pre><code>"; inCode = !inCode; continue; }
+      if (inCode) { html += line + "\n"; continue; }
+      if (/^\s*[-*•] /.test(line)) { if (!inList) { html += "<ul>"; inList = true; } html += "<li>" + mdInline(line.replace(/^\s*[-*•] /, "")) + "</li>"; continue; }
+      closeList();
+      if (/^#{1,3} /.test(line)) { html += "<h3>" + mdInline(line.replace(/^#{1,3} /, "")) + "</h3>"; continue; }
+      if (line.trim() === "") { html += ""; continue; }
+      html += "<p>" + mdInline(line) + "</p>";
+    }
+    closeList(); if (inCode) html += "</code></pre>";
+    return html;
+  }
 
-function renderViews(){
-  const host=document.getElementById('viewHost');
-  if(!HUB._views.length){ host.innerHTML='<div class="empty">No views loaded. Generated components from views/ appear here.</div>'; return; }
-  host.innerHTML='';
-  HUB._views.forEach(v=>{
-    const card=document.createElement('div'); card.className='vcard';
-    card.innerHTML=`<div class="vh"><span class="t">${v.title}</span><span class="g">${v.group||'view'}</span></div>`;
-    const mount=document.createElement('div'); card.appendChild(mount); host.appendChild(card);
-    try{ v.render(HUB.data, mount); }catch(e){ mount.innerHTML=`<div class="vnote">view error: ${e.message}</div>`; }
+  // ── chat rendering ──
+  const chatInner = $("chatInner");
+  function scrollDown() { $("chat").scrollTop = $("chat").scrollHeight; }
+  function addUser(text) {
+    $("emptyState")?.remove();
+    const d = document.createElement("div"); d.className = "msg user"; d.textContent = text;
+    chatInner.appendChild(d); scrollDown();
+  }
+  function addSys(text, cls) {
+    $("emptyState")?.remove();
+    const d = document.createElement("div"); d.className = "sys" + (cls ? " " + cls : ""); d.innerHTML = text;
+    chatInner.appendChild(d); scrollDown(); return d;
+  }
+  function newAssistant() {
+    $("emptyState")?.remove();
+    const wrap = document.createElement("div"); wrap.className = "msg assistant";
+    const body = document.createElement("div"); body.className = "body md"; wrap.appendChild(body);
+    chatInner.appendChild(wrap);
+    let raw = "";
+    return {
+      append(s) { raw += s; body.textContent = raw; scrollDown(); },
+      finalize() { if (raw.trim()) body.innerHTML = md(raw); else wrap.remove(); scrollDown(); },
+      get text() { return raw; }
+    };
+  }
+  function renderThreadMessages(t) {
+    chatInner.innerHTML = "";
+    for (const m of t.messages || []) {
+      if (m.role === "user" && typeof m.content === "string") addUser(m.content);
+      else if (m.role === "assistant" && Array.isArray(m.content)) {
+        const text = m.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+        const tools = m.content.filter((b) => b.type === "tool_use" || b.type === "server_tool_use");
+        for (const tu of tools) addSys("⚙ <span class='nm'>" + esc(tu.name) + "</span>");
+        if (text) { const a = newAssistant(); a.append(text); a.finalize(); }
+      }
+    }
+    if (!(t.messages || []).length) chatInner.innerHTML = '<div class="empty">empty thread — say something</div>';
+    scrollDown();
+  }
+
+  // ── NDJSON reader ──
+  async function readNDJSON(res, onEvent) {
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line) continue;
+        try { onEvent(JSON.parse(line)); } catch {}
+      }
+    }
+  }
+
+  // ── send a chat turn ──
+  async function send() {
+    const input = $("input");
+    const text = input.value.trim();
+    if (!text || state.busy) return;
+    state.busy = true; $("send").disabled = true; input.value = "";
+    addUser(text);
+    let assistant = newAssistant();
+    try {
+      const res = await api("/api/chat", { method: "POST", body: JSON.stringify({ threadId: state.threadId, message: text }) });
+      if (!res.ok) { addSys("⚠ " + esc(await res.text()), "err"); }
+      else await readNDJSON(res, (ev) => {
+        if (ev.t === "meta") { state.threadId = ev.threadId; }
+        else if (ev.t === "delta") assistant.append(ev.s);
+        else if (ev.t === "tool") { assistant.finalize(); addSys("⚙ <span class='nm'>" + esc(ev.name) + "</span>"); assistant = newAssistant(); }
+        else if (ev.t === "progress") addSys("· " + esc(ev.s));
+        else if (ev.t === "artifact") { refreshState(); if (state.panel && state.panel.id === ev.id) openArtifact(state.panel.kind, ev.id, true); }
+        else if (ev.t === "error") addSys("⚠ " + esc(ev.s), "err");
+      });
+    } catch (e) { addSys("⚠ " + esc(e.message || String(e)), "err"); }
+    assistant.finalize();
+    state.busy = false; $("send").disabled = false;
+    refreshState();
+  }
+
+  // ── sidebar ──
+  function fmtTs(ts) { try { return new Date(ts).toISOString().slice(5, 16).replace("T", " "); } catch { return ""; } }
+  function renderList() {
+    const el = $("list"); el.innerHTML = "";
+    const items = state.tab === "threads" ? state.threads : state.tab === "studies" ? state.studies : state.benchmarks;
+    if (!items.length) { el.innerHTML = '<div class="empty" style="margin:20px auto">nothing here yet</div>'; return; }
+    for (const it of items) {
+      const d = document.createElement("div");
+      d.className = "item" + (state.tab === "threads" && it.id === state.threadId ? " on" : "");
+      const meta = state.tab === "threads" ? `${it.messages} msgs · ${fmtTs(it.updated)}`
+        : state.tab === "studies" ? `${it.notes} notes · ${fmtTs(it.updated)}`
+        : `${it.runs} runs · ${it.lastStatus} · ${fmtTs(it.updated)}`;
+      d.innerHTML = `<div class="t">${esc(it.title || it.name || it.id)}</div><div class="m">${esc(meta)}</div>`;
+      d.onclick = () => {
+        if (state.tab === "threads") openThread(it.id);
+        else openArtifact(state.tab === "studies" ? "study" : "bench", it.id);
+      };
+      el.appendChild(d);
+    }
+  }
+  async function openThread(id) {
+    const res = await api("/api/thread/" + id);
+    if (!res.ok) return;
+    const t = await res.json();
+    state.threadId = t.id;
+    renderThreadMessages(t);
+    renderList();
+  }
+
+  // ── artifact panel ──
+  function panelOpen(title) { $("panelTitle").textContent = title; $("panel").classList.add("open"); }
+  $("panelClose").onclick = () => { $("panel").classList.remove("open"); state.panel = null; };
+
+  function metricsTable(run) {
+    if (!run || run.status !== "done") return `<div class="kv">latest run: ${esc(run ? run.status + " — " + (run.errors || []).join("; ") : "never run")}</div>`;
+    const rows = run.variants.map((v) => {
+      const m = v.metrics;
+      const pr = Math.round(m.passRate * 100);
+      const lev = m.leverage === "baseline" ? '<span class="hi">baseline</span>'
+        : m.leverage === "dominates" ? '<span class="good">dominates</span>'
+        : m.leverage === "dominated" ? '<span class="bad">dominated</span>'
+        : (m.leverage > 0 ? '<span class="good">' : '<span class="bad">') + m.leverage + "/$</span>";
+      return `<tr>
+        <td class="hi">${esc(v.label || v.id)}<br/><span style="color:var(--faint)">${esc(v.model.replace("claude-", ""))} · ${esc(v.pattern)}${v.n || ""}${v.effort ? " · " + v.effort : ""}</span></td>
+        <td class="${pr >= 70 ? "good" : pr >= 40 ? "" : "bad"}">${m.passes}/${m.trials} (${pr}%)</td>
+        <td>$${m.cost}</td>
+        <td>${m.costOfPass === null ? '<span class="bad">∞</span>' : "$" + m.costOfPass}</td>
+        <td>${m.tokensIn}/${m.tokensOut}</td>
+        <td>${m.avgLatencyMs}ms</td>
+        <td>${m.convergence === null ? "—" : m.convergence}</td>
+        <td>${lev}</td>
+      </tr>`;
+    }).join("");
+    return `<div class="kv">run ${esc(run.id)} · ${fmtTs(run.ts)} · ${run.totals.calls} calls · $${run.totals.cost} (+$${run.totals.evalCost} eval) · ${Math.round(run.wallMs / 1000)}s wall</div>
+      <table class="vt"><thead><tr><th>variant</th><th>pass</th><th>$ cost</th><th>cost-of-pass</th><th>tok in/out</th><th>latency</th><th>converge</th><th>leverage</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  async function openArtifact(kind, id, keepScroll) {
+    const res = await api(kind === "study" ? "/api/study/" + id : "/api/bench/" + id);
+    if (!res.ok) return;
+    const a = await res.json();
+    state.panel = { kind, id };
+    const body = $("panelBody");
+    if (kind === "study") {
+      panelOpen(a.title);
+      body.innerHTML = `<div class="kv">study ${esc(a.id)} · ${a.notes.length} notes · updated ${fmtTs(a.updated)}</div>` +
+        a.notes.map((n) => `<div class="note">
+          <div class="nt">${esc(n.title)}</div>
+          <div class="nm">${fmtTs(n.ts)} · ${esc(n.origin)}</div>
+          <div class="nc md">${md(n.content)}</div>
+          ${n.sources && n.sources.length ? `<div class="chips">${n.sources.map((s) => `<a class="chip" href="${esc(s)}" target="_blank" rel="noopener">${esc(s.replace(/^https?:\/\//, "").slice(0, 46))}</a>`).join("")}</div>` : ""}
+        </div>`).join("");
+    } else {
+      panelOpen(a.name);
+      const latest = a.runs && a.runs[0];
+      const spec = a.spec || {};
+      body.innerHTML =
+        `<div class="kv">bench ${esc(a.id)} · ${(a.runs || []).length} runs</div>` +
+        (a.hypothesis ? `<div class="nc md" style="margin-bottom:6px">${md("**Hypothesis:** " + a.hypothesis)}</div>` : "") +
+        `<div class="sect">Spec — ${(spec.tasks || []).length} tasks × ${(spec.variants || []).length} variants × ${spec.trials || 1} trial(s)</div>` +
+        `<table class="vt"><thead><tr><th>variant</th><th>model</th><th>pattern</th><th>effort</th><th>max tok</th></tr></thead><tbody>` +
+        (spec.variants || []).map((v) => `<tr><td class="hi">${esc(v.label || v.id)}</td><td>${esc(v.model)}</td><td>${esc(v.pattern)}${v.n || ""}</td><td>${esc(v.effort || "—")}</td><td>${v.maxTokens}</td></tr>`).join("") +
+        `</tbody></table>` +
+        `<div class="chips">${(spec.tasks || []).map((t) => `<span class="chip" title="${esc(t.prompt.slice(0, 200))}">${esc(t.id)}: ${esc(t.check.type)}</span>`).join("")}</div>` +
+        `<div style="display:flex;gap:8px;margin:14px 0"><button class="btn primary" id="runBtn">Run now</button><button class="btn" id="queueBtn">Queue for nightly</button></div>` +
+        `<div class="runlog" id="runLog" style="display:none"></div>` +
+        `<div class="sect">Latest measured run</div><div id="latestRun">${metricsTable(latest)}</div>` +
+        ((a.runs || []).length > 1 ? `<div class="sect">History</div><select id="runSel">${a.runs.map((r, i) => `<option value="${i}">${r.id} · ${fmtTs(r.ts)} · ${r.status}</option>`).join("")}</select>` : "");
+      const runSel = $("runSel");
+      if (runSel) runSel.onchange = () => { $("latestRun").innerHTML = metricsTable(a.runs[Number(runSel.value)]); };
+      $("queueBtn").onclick = async () => {
+        const r = await api("/api/bench/queue", { method: "POST", body: JSON.stringify({ id: a.id }) });
+        $("queueBtn").textContent = r.ok ? "queued ✓" : "queue failed";
+      };
+      $("runBtn").onclick = async () => {
+        const log = $("runLog"); log.style.display = "block"; log.textContent = "starting…\n";
+        $("runBtn").disabled = true;
+        try {
+          const r = await api("/api/bench/run", { method: "POST", body: JSON.stringify({ id: a.id }) });
+          await readNDJSON(r, (ev) => {
+            if (ev.t === "progress") { log.textContent += ev.s + "\n"; log.scrollTop = log.scrollHeight; }
+            else if (ev.t === "run") { $("latestRun").innerHTML = metricsTable(ev.run); log.textContent += "done.\n"; }
+            else if (ev.t === "error") log.textContent += "⚠ " + ev.s + "\n";
+          });
+        } catch (e) { log.textContent += "⚠ " + (e.message || e) + "\n"; }
+        $("runBtn").disabled = false;
+        refreshState();
+      };
+    }
+    if (!keepScroll) $("panelBody").scrollTop = 0;
+  }
+
+  // ── boot / state ──
+  async function refreshState() {
+    try {
+      const res = await api("/api/state");
+      if (!res.ok) throw new Error("state " + res.status);
+      const s = await res.json();
+      state.threads = s.threads || []; state.studies = s.studies || []; state.benchmarks = s.benchmarks || [];
+      $("status").innerHTML = `key: <b>${s.hasKey ? "set" : "missing"}</b> · ${s.model.replace("claude-", "")} · queue: <b>${s.queue}</b>`;
+      renderList();
+    } catch (e) {
+      $("status").textContent = "offline: " + (e.message || e);
+    }
+  }
+  document.querySelectorAll(".tab").forEach((t) => {
+    t.onclick = () => {
+      document.querySelectorAll(".tab").forEach((x) => x.classList.remove("on"));
+      t.classList.add("on");
+      state.tab = t.dataset.tab;
+      renderList();
+    };
   });
-}
+  $("newThread").onclick = () => { state.threadId = null; chatInner.innerHTML = ""; chatInner.appendChild(Object.assign(document.createElement("div"), { className: "empty", id: "emptyState", textContent: "new thread — say something" })); renderList(); };
+  $("send").onclick = send;
+  $("input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
 
-function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error(src)); document.head.appendChild(s); }); }
-
-// fallback example views (used when views/ can't be fetched, e.g. opened without a server)
-function registerFallbackViews(){
-  HUB.registerView({ id:'convergence', title:'Convergence vs thrash', group:'signal', render(data,el){
-    const cv=document.createElement('canvas'); cv.style.width='100%'; cv.style.height='150px'; el.appendChild(cv);
-    const n=document.createElement('div'); n.className='vnote';
-    n.textContent=`${(data.results||[]).filter(r=>r.outcome==='pass').length} passing runs · teal converges, vermilion thrashes`; el.appendChild(n);
-    requestAnimationFrame(()=>{ const dpr=devicePixelRatio||1,W=cv.clientWidth||400,H=150; cv.width=W*dpr; cv.height=H*dpr; const c=cv.getContext('2d'); c.scale(dpr,dpr);
-      const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim(); let t=0;
-      function path(seed,amp,decay,color,target){ c.beginPath(); for(let x=0;x<=W;x++){ const p=x/W,no=Math.sin(x*0.18+seed)+Math.sin(x*0.07+seed*2),env=amp*Math.exp(-decay*p)*(1-p*0.2); const y=target+no*env*(1+Math.sin(t*0.02+seed)*0.15); x===0?c.moveTo(x,y):c.lineTo(x,y);} c.strokeStyle=color; c.lineWidth=1.5; c.stroke(); }
-      (function f(){ c.clearRect(0,0,W,H); c.strokeStyle='rgba(255,255,255,.06)'; c.setLineDash([3,4]); c.beginPath(); c.moveTo(0,H*.5); c.lineTo(W,H*.5); c.stroke(); c.setLineDash([]); path(1.2,24,2.6,css('--converge'),H*.5); path(4.7,18,.2,css('--thrash'),H*.42); t++; requestAnimationFrame(f); })();
-    });
-  }});
-  HUB.registerView({ id:'results-table', title:'Results · cost-of-pass', group:'results', render(data,el){
-    const rows=(data.results||[]).map(r=>`<tr><td>${r.exp}</td><td style="color:var(--paper)">${r.varied}</td><td style="color:${r.outcome==='pass'?'var(--converge)':'var(--thrash)'}">${r.outcome}</td><td>$${(r.cost??0).toFixed(3)}</td><td>${r.time??'—'}m</td><td style="color:var(--converge)">${r.outcome==='pass'?'$'+(r.cost??0).toFixed(3):'—'}</td></tr>`).join('');
-    el.innerHTML=`<table class="vt"><thead><tr><th>exp</th><th>varied</th><th>result</th><th>cost</th><th>time</th><th>cost-of-pass</th></tr></thead><tbody>${rows||'<tr><td colspan=6 class=vnote>no results</td></tr>'}</tbody></table>`;
-  }});
-}
-
-(async function boot(){
-  let mode='embedded';
-  try{ const r=await fetch('data/state.json'); if(r.ok){ HUB.data=await r.json(); mode='live'; } }catch(e){}
-  if(!HUB.data) HUB.data=EMBEDDED;
-  renderCanonical(HUB.data);
-  let loaded=0;
-  try{ const m=await fetch('views/manifest.json'); if(m.ok){ const list=(await m.json()).views||[]; for(const v of list){ try{ await loadScript('views/'+v); loaded++; }catch(e){} } } }catch(e){}
-  if(loaded===0) registerFallbackViews();
-  renderViews();
-  document.getElementById('status').innerHTML = `data: <b>${mode}</b> · views: <b>${HUB._views.length}</b>${loaded===0?' (inline examples)':''}`;
+  refreshState();
 })();
 </script>
+</html>

@@ -176,3 +176,35 @@ benchmark with a 0–5 rubric and seed scores, and the weekly schedule. Written 
 
 `wrangler login` → `wrangler kv namespace create USAI_KV` (paste id) →
 `wrangler secret put ANTHROPIC_API_KEY` → `npm run deploy`. The cron then runs daily.
+
+---
+
+# v2 — from editorial dashboard to measuring lab
+
+Operator verdict on v1: "a meaningless dashboard." Correct diagnosis: v1's benchmark
+scores were produced by web research — Claude's *opinion* on a 0–5 scale — so nothing
+in the product measured anything. The numbers couldn't justify a deploy decision.
+
+v2 inverts the architecture around the operator's actual loop — *take information /
+research → design experiments → run them → select an architecture → deploy*:
+
+- **Chat-first.** The UI is a chat workbench (`public/index.html`); the assistant holds
+  lab tools (`save_study_note`, `create_benchmark`, `run_benchmark`, `queue_benchmark`,
+  `get_*`) plus `web_search`/`web_fetch`. Conversations produce durable artifacts.
+- **Benchmarks are real runs.** `src/lab.js` executes tasks × variants (model × pattern
+  × effort) × trials against live APIs and meters every call: tokens, $ (pricing table),
+  latency, pass rate (objective checkers or a haiku judge), cost-of-pass, convergence
+  (trial agreement / critique settled-rate), and leverage (Δpass-rate per Δ$ vs the
+  baseline variant). Harness patterns implemented: single, plan, critique, best-of-N.
+- **Collaborative persistence.** Studies, benchmarks + runs, and threads live in KV,
+  shared by everyone on the deployment; optional ACCESS_TOKEN secret gates /api/*.
+- **Cron = queue drain.** The daily editorial study is gone; scheduled invocations now
+  execute queued (large) benchmark runs with the 15-minute budget.
+- **Continuity.** v1 findings + the Kaggle leaderboard pull auto-import into a study on
+  first request (`store.migrateV1`); the v1 thin-shell dashboard is preserved unserved
+  in `legacy/`.
+
+Verified end-to-end before deploy: one chat message designed, created, and ran a
+2-task × 2-variant benchmark in 22s (6 metered API calls), persisted the run, and the
+assistant's analysis used only the measured numbers — including the honest "this sample
+is a smoke signal" caveat and a proposed follow-up experiment.

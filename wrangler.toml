@@ -11,10 +11,9 @@ compatibility_flags = ["nodejs_compat"]
 [assets]
 directory = "./public"
 binding = "ASSETS"
-# Static assets are served first; these paths run the Worker instead so it can
-# serve merged live state and the API. Everything else (index.html, views/*, the
-# seed) is served straight from ./public.
-run_worker_first = ["/api/*", "/data/state.json"]
+# Static assets are served first; /api/* runs the Worker (chat agent, studies,
+# benchmarks, runs). Everything else (the workbench UI) serves from ./public.
+run_worker_first = ["/api/*"]
 not_found_handling = "404-page"
 
 # Persistent store for findings + live benchmark scores. `wrangler dev` simulates
@@ -24,11 +23,13 @@ not_found_handling = "404-page"
 binding = "USAI_KV"
 id = "3cbf7af7c8354f2fafffc1e87fabdccb"
 
-# Autonomous study cadence. Daily at 13:00 UTC; the handler picks the day's
-# subject (see src/studies.js SCHEDULE). Edit here to change frequency.
+# Nightly queue drain: benchmarks too large for a synchronous HTTP run are
+# queued and executed here (scheduled invocations get a ~15-minute budget).
 [triggers]
 crons = ["0 13 * * *"]
 
-# ANTHROPIC_API_KEY is a SECRET, not a var — do not put it here.
-#   local: add it to .dev.vars  (ANTHROPIC_API_KEY=sk-ant-...)
-#   cloud: npx wrangler secret put ANTHROPIC_API_KEY
+# Secrets (never put values here):
+#   ANTHROPIC_API_KEY — required for chat + benchmark runs
+#     local: .dev.vars (ANTHROPIC_API_KEY=sk-ant-...)   cloud: npx wrangler secret put ANTHROPIC_API_KEY
+#   ACCESS_TOKEN — optional shared key; when set, /api/* requires the
+#     x-usai-key header. Recommended: chat and runs spend YOUR Anthropic tokens.
