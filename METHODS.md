@@ -1,8 +1,33 @@
 # intellistudy — methods
 
 What the lab measures, exactly how, and what the numbers mean. The spec-of-record
-is the code: `src/lab.js` (runner, metrics, pricing) and `src/agent.js` (the chat
-agent and its tools).
+is the code: `src/lab.js` (runner, metrics, pricing), `src/pods.js` (open-weight
+provisioning), `src/tools.js` (the tool surface), `src/agent.js` (the driver).
+Governance lives in [DIRECTIVE.md](./DIRECTIVE.md) — R1–R5 bind everything here.
+
+## Providers
+
+- **Anthropic API** (`provider:"anthropic"`): metered from billed usage × the
+  pricing table. Per-model parameter shaping is honest to each surface (haiku: no
+  effort/thinking; fable-5: thinking always on; opus/sonnet: adaptive).
+- **Open weights** (`provider:"vllm"` + `pod_id`): served by vLLM on RunPod GPUs
+  (`provision_pod` → `pod_status` until `ready` → benchmark → `terminate_pod`).
+  Cost is **pod-hour amortized per call** (rate × call wall-clock) — a serial
+  upper bound when cells run in parallel, since the pod bills by the hour
+  regardless. TTL reaping (hourly) and the $50 provisioning cap are enforced in
+  code. `temperature: 0` and the served model id are logged.
+
+## Uncertainty (R4 quadruple)
+
+Every pass-rate carries a **95% Wilson interval** and its n. Runner enforcement
+of budget: each run has a `budgetCapUsd` (default $10, max $50) and aborts
+mid-run when cumulative spend crosses it (`status: "partial-budget"`).
+
+## Ruler identity (R2/R3)
+
+Every run stamps `harness: {version, templateHash}`; every call records the
+**served** model string. Benchmarks freeze on first run; `amend_benchmark`
+creates version N+1 with a parent link.
 
 ## The object model
 

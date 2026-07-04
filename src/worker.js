@@ -22,6 +22,9 @@
 import * as store from "./store.js";
 import { runBenchmark, summarizeRun } from "./lab.js";
 import { chatStream, hasKey, CHAT_MODEL } from "./agent.js";
+import { handleMcp } from "./mcp.js";
+import { runWeeklyDigest } from "./tools.js";
+import { listPods, reapExpired, hasRunpod } from "./pods.js";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data, null, 2), {
@@ -50,7 +53,7 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
 
-    if (!pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
+    if (!pathname.startsWith("/api/") && pathname !== "/mcp") return env.ASSETS.fetch(request);
 
     if (pathname === "/api/health") {
       return json({
@@ -59,6 +62,7 @@ export default {
         kv: Boolean(env.USAI_KV),
         model: CHAT_MODEL,
         gated: Boolean(env.ACCESS_TOKEN),
+        runpod: hasRunpod(env),
         queue: await store.queueLength(env)
       });
     }
@@ -67,14 +71,20 @@ export default {
       return json({ error: "unauthorized", detail: "provide the shared key via the x-usai-key header (set as the ACCESS_TOKEN secret)" }, 401);
     }
 
+    // ── MCP (directive §6): same tool surface as the chat, over streamable HTTP ──
+    if (pathname === "/mcp") return handleMcp(request, env);
+
     // ── library state ──
     if (pathname === "/api/state") {
-      await store.migrateV1(env); // one-time: fold v1 findings/kaggle pull into a study
-      const [threads, studies, benches, queue] = await Promise.all([
-        store.listThreads(env), store.listStudies(env), store.listBenches(env), store.queueLength(env)
+      await store.migrateV1(env);   // one-time: fold v1 findings/kaggle pull into a study
+      await store.seedProblems(env); // one-time: P-001 per directive §5
+      const [threads, studies, benches, queue, livePods] = await Promise.all([
+        store.listThreads(env), store.listStudies(env), store.listBenches(env), store.queueLength(env), listPods(env)
       ]);
-      return json({ threads, studies, benchmarks: benches, queue, hasKey: hasKey(env), model: CHAT_MODEL });
+      return json({ threads, studies, benchmarks: benches, pods: livePods, queue, hasKey: hasKey(env), runpod: hasRunpod(env), model: CHAT_MODEL });
     }
+    if (pathname === "/api/pods") return json(await listPods(env));
+    if (pathname === "/api/problems") return json(await store.listProblems(env));
 
     // ── threads ──
     if (pathname === "/api/threads") return json(await store.listThreads(env));
@@ -148,13 +158,18 @@ export default {
     return json({ error: "not found" }, 404);
   },
 
-  // Cron: drain the benchmark run queue with a bigger budget (scheduled
-  // invocations get ~15 minutes; awaited directly so the runtime waits).
+  // Hourly cron, three duties in order (scheduled invocations get ~15 minutes):
+  //   1. reap pods past their TTL (money safety — a forgotten pod can't burn overnight)
+  //   2. drain the benchmark run queue with the bigger budget
+  //   3. Mondays 13:00 UTC: the weekly model/paper scan (directive §3), report-only
   async scheduled(controller, env, ctx) {
-    if (!hasKey(env)) { console.log("[cron] skipped: no ANTHROPIC_API_KEY"); return; }
+    for (const line of await reapExpired(env).catch(() => [])) console.log("[cron]", line);
+
+    if (!hasKey(env)) { console.log("[cron] no ANTHROPIC_API_KEY — queue + digest skipped"); return; }
+
     for (let i = 0; i < 2; i++) {
       const item = await store.queuePop(env);
-      if (!item) { if (i === 0) console.log("[cron] queue empty"); return; }
+      if (!item) break;
       const bench = await store.getBench(env, item.benchId);
       if (!bench) { console.log(`[cron] bench ${item.benchId} missing`); continue; }
       try {
@@ -164,6 +179,12 @@ export default {
       } catch (e) {
         console.log(`[cron] run of ${bench.id} failed:`, e?.message || e);
       }
+    }
+
+    const now = new Date();
+    if (now.getUTCDay() === 1 && now.getUTCHours() === 13) {
+      const r = await runWeeklyDigest(env).catch((e) => ({ ok: false, reason: String(e) }));
+      console.log("[cron] weekly digest:", r.ok ? "filed" : r.reason);
     }
   }
 };

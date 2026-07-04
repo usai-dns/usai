@@ -83,6 +83,7 @@ export async function getBench(env, id) {
   return kvGet(env, "bench:" + id, null);
 }
 export async function saveBench(env, bench) {
+  bench.version = bench.version || 1; // normalize pre-versioning benches
   bench.updated = new Date().toISOString();
   await kvPut(env, "bench:" + bench.id, bench);
   const last = bench.runs && bench.runs[0];
@@ -97,24 +98,46 @@ export async function saveBench(env, bench) {
   await kvPut(env, IDX_BENCHES, idx.slice(0, 200));
   return bench;
 }
-export async function createBench(env, { name, hypothesis, spec }) {
+export async function createBench(env, { name, hypothesis, spec, version = 1, parentId = null }) {
   const bench = {
     id: newId(),
     name: (name || "Untitled benchmark").slice(0, 120),
     hypothesis: (hypothesis || "").slice(0, 500),
     spec,
+    version,
+    parentId,
+    frozen: false, // R2: flips true on first run; specs never mutate after that
     created: new Date().toISOString(),
     updated: new Date().toISOString(),
     runs: []
   };
   return saveBench(env, bench);
 }
+// R2: amendments never touch a frozen version — they create vN+1 with a parent link.
+export async function amendBench(env, parentBenchId, { spec, hypothesis, name }) {
+  const parent = await getBench(env, parentBenchId);
+  if (!parent) return null;
+  return createBench(env, {
+    name: name || parent.name,
+    hypothesis: hypothesis ?? parent.hypothesis,
+    spec: spec || parent.spec,
+    version: (parent.version || 1) + 1,
+    parentId: parent.id
+  });
+}
 export async function addRun(env, benchId, run) {
   const bench = await getBench(env, benchId);
   if (!bench) return null;
+  bench.frozen = true; // R2: first run freezes the spec forever
   bench.runs.unshift(run);
   bench.runs = bench.runs.slice(0, 20); // keep run history bounded
+  // run_id → bench_id map so reports can be pulled by either id
+  if (env.USAI_KV && run.id) await kvPut(env, "run:" + run.id, { benchId });
   return saveBench(env, bench);
+}
+export async function benchIdForRun(env, runId) {
+  const m = await kvGet(env, "run:" + runId, null);
+  return m ? m.benchId : null;
 }
 
 // ── threads (saved chats) ────────────────────────────────────────────────────
@@ -158,6 +181,58 @@ export function trimMessages(messages, max = 40) {
     );
   }
   return start > 0 ? tail.slice(start) : tail;
+}
+
+// ── problems (directive §5 intake) ───────────────────────────────────────────
+const IDX_PROBLEMS = "idx:problems";
+export const PROBLEM_CLASSES = ["extraction", "drafting", "classification", "conversation", "routing"];
+
+export async function listProblems(env) {
+  return kvGet(env, IDX_PROBLEMS, []);
+}
+export async function submitProblem(env, p) {
+  const problems = await listProblems(env);
+  const id = p.problem_id || "P-" + String(problems.length + 1).padStart(3, "0");
+  const entry = {
+    problem_id: id,
+    name: String(p.name || "unnamed").slice(0, 120),
+    problem_class: PROBLEM_CLASSES.includes(p.problem_class) ? p.problem_class : "extraction",
+    description: String(p.description || "").slice(0, 2000),
+    input_spec: String(p.input_spec || "").slice(0, 1000),
+    gold_output_spec: String(p.gold_output_spec || "").slice(0, 1000),
+    latency_tolerance: ["batch", "interactive", "realtime-voice"].includes(p.latency_tolerance) ? p.latency_tolerance : "batch",
+    data_sensitivity: ["public", "client", "borrower-PII"].includes(p.data_sensitivity) ? p.data_sensitivity : "client",
+    volume_estimate: String(p.volume_estimate || "").slice(0, 200),
+    current_solution: String(p.current_solution || "").slice(0, 300),
+    gold_set_status: String(p.gold_set_status || "none").slice(0, 60),
+    ts: new Date().toISOString()
+  };
+  const idx = problems.filter((x) => x.problem_id !== entry.problem_id);
+  idx.unshift(entry);
+  await kvPut(env, IDX_PROBLEMS, idx.slice(0, 100));
+  return entry;
+}
+// Seed P-001 (directive §5, committed) exactly once.
+export async function seedProblems(env) {
+  if (!env.USAI_KV) return;
+  if (await kvGet(env, "seed:problems", false)) return;
+  const existing = await listProblems(env);
+  if (!existing.some((p) => p.problem_id === "P-001")) {
+    await submitProblem(env, {
+      problem_id: "P-001",
+      name: "Post-call transcript parsing / qualification extraction",
+      problem_class: "extraction",
+      description: "Parse call transcripts into structured qualification fields. Becomes authored benchmark FF-EXTRACT v1.0 (50 transcripts, 40 dev / 10 holdout, field-level F1 + schema validity + exact-match on critical fields).",
+      input_spec: "call transcript (text)",
+      gold_output_spec: "structured qualification JSON (field schema TBD with gold set)",
+      latency_tolerance: "batch",
+      data_sensitivity: "borrower-PII",
+      volume_estimate: "TBD",
+      current_solution: "frontier API model in production",
+      gold_set_status: "blocked: awaiting 50 transcripts with gold outputs from Dennis"
+    });
+  }
+  await kvPut(env, "seed:problems", true);
 }
 
 // ── run queue (cron-processed) ───────────────────────────────────────────────

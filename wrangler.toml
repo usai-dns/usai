@@ -23,13 +23,15 @@ not_found_handling = "404-page"
 binding = "USAI_KV"
 id = "3cbf7af7c8354f2fafffc1e87fabdccb"
 
-# Nightly queue drain: benchmarks too large for a synchronous HTTP run are
-# queued and executed here (scheduled invocations get a ~15-minute budget).
+# Hourly: reap pods past TTL (money safety), drain the benchmark run queue
+# (~15-minute budget), and on Mondays 13:00 UTC run the weekly scan digest.
 [triggers]
-crons = ["0 13 * * *"]
+crons = ["0 * * * *"]
 
 # Secrets (never put values here):
 #   ANTHROPIC_API_KEY — required for chat + benchmark runs
 #     local: .dev.vars (ANTHROPIC_API_KEY=sk-ant-...)   cloud: npx wrangler secret put ANTHROPIC_API_KEY
-#   ACCESS_TOKEN — optional shared key; when set, /api/* requires the
-#     x-usai-key header. Recommended: chat and runs spend YOUR Anthropic tokens.
+#   ACCESS_TOKEN — shared key; when set, /api/* and /mcp require the x-usai-key
+#     header. Recommended: chat and runs spend YOUR Anthropic tokens.
+#   RUNPOD_API_KEY — optional; enables open-weight pod provisioning (vLLM on RunPod)
+#   HF_TOKEN — optional; passed to pods for gated HF repos (e.g. Llama)

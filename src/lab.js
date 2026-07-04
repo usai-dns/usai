@@ -23,6 +23,20 @@
 // is the honest accounting that makes leverage meaningful.
 
 import Anthropic from "@anthropic-ai/sdk";
+import { callVllm, podStatus } from "./pods.js";
+
+// Ruler identity (R2): scores are conditional on the harness. Bump the version
+// whenever SYS or a pattern template changes; the hash is stamped on every run.
+export const HARNESS_VERSION = "h1.0";
+function djb2(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return h.toString(16); }
+
+// Wilson 95% interval for a pass-rate — the uncertainty part of the quadruple.
+export function wilson(k, n, z = 1.96) {
+  if (!n) return null;
+  const p = k / n, d = 1 + (z * z) / n, c = p + (z * z) / (2 * n);
+  const m = z * Math.sqrt((p * (1 - p) + (z * z) / (4 * n)) / n);
+  return [Math.max(0, (c - m) / d), Math.min(1, (c + m) / d)].map((x) => Math.round(x * 1000) / 1000);
+}
 
 // $ per MTok — in/out (+ cache read ≈0.1×in, cache write ≈1.25×in).
 export const PRICING = {
@@ -72,8 +86,23 @@ async function callModel(env, { model, system, messages, effort, thinking, maxTo
     refused: msg.stop_reason === "refusal",
     usage: msg.usage || {},
     ms,
-    cost: costOf(model, msg.usage)
+    cost: costOf(model, msg.usage),
+    servedModel: msg.model || model // R3: record what actually served, not what we asked for
   };
+}
+
+// Route a harness turn to the right provider. vLLM pods speak OpenAI-format
+// messages (system as a message role); anthropic takes system separately.
+async function callTurn(env, variant, pod, { system, messages, maxTokens }) {
+  if (variant.provider === "vllm") {
+    const oai = system ? [{ role: "system", content: system }, ...messages] : messages;
+    return callVllm(env, pod, { messages: oai, maxTokens: maxTokens || variant.maxTokens });
+  }
+  return callModel(env, {
+    model: variant.model, system, messages,
+    effort: variant.effort, thinking: variant.thinking,
+    maxTokens: maxTokens || variant.maxTokens
+  });
 }
 
 // ── spec validation ──────────────────────────────────────────────────────────
@@ -85,6 +114,9 @@ export function validateSpec(raw) {
   if (!tasks.length) errors.push("spec.tasks is required (1-8 tasks)");
   if (!variants.length) errors.push("spec.variants is required (1-6 variants)");
   spec.trials = Math.max(1, Math.min(3, Number(raw?.trials) || 1));
+  // Per-experiment $ cap (directive: standing cap $50; default conservative).
+  spec.budgetCapUsd = Math.max(0.5, Math.min(50, Number(raw?.budgetCapUsd) || 10));
+  if (raw?.problem_class) spec.problem_class = String(raw.problem_class).slice(0, 40);
 
   tasks.forEach((t, i) => {
     const id = String(t.id || "t" + (i + 1));
@@ -101,13 +133,19 @@ export function validateSpec(raw) {
 
   variants.forEach((v, i) => {
     const id = String(v.id || "v" + (i + 1));
-    const model = MODELS.includes(v.model) ? v.model : null;
-    if (!model) errors.push(`variant ${id}: model must be one of ${MODELS.join(", ")}`);
+    const provider = v.provider === "vllm" ? "vllm" : "anthropic";
+    let model = v.model ? String(v.model) : null;
+    if (provider === "anthropic") {
+      if (!MODELS.includes(model)) errors.push(`variant ${id}: model must be one of ${MODELS.join(", ")} (or set provider:"vllm" with a pod_id for open weights)`);
+    } else if (!v.pod_id) {
+      errors.push(`variant ${id}: provider "vllm" requires pod_id (provision one first)`);
+    }
     const pattern = PATTERNS.includes(v.pattern) ? v.pattern : "single";
     const n = pattern === "bestofN" ? Math.max(2, Math.min(4, Number(v.n) || 2)) : undefined;
-    const effort = ["low", "medium", "high", "xhigh", "max"].includes(v.effort) ? v.effort : undefined;
+    const effort = provider === "anthropic" && ["low", "medium", "high", "xhigh", "max"].includes(v.effort) ? v.effort : undefined;
     spec.variants.push({
-      id, model, pattern, n, effort,
+      id, provider, model, pattern, n, effort,
+      pod_id: provider === "vllm" ? String(v.pod_id) : undefined,
       thinking: v.thinking === "off" ? "off" : "adaptive",
       maxTokens: Math.max(256, Math.min(8000, Number(v.maxTokens) || 1500)),
       label: v.label ? String(v.label).slice(0, 80) : undefined
@@ -127,6 +165,11 @@ export function estimateCost(spec) {
   let dollars = 0;
   for (const v of spec.variants) {
     const per = (v.pattern === "single" ? 1 : v.pattern === "bestofN" ? v.n + 1 : 2);
+    if (v.provider === "vllm") {
+      // pod-hour amortized: assume ~$2.5/hr worst case × ~20s/call
+      dollars += per * spec.tasks.length * spec.trials * (2.5 * (20 / 3600));
+      continue;
+    }
     const p = PRICING[v.model];
     // assume ~1.2k in / maxTokens out worst case per call
     dollars += per * spec.tasks.length * spec.trials * ((1200 * p.in + v.maxTokens * p.out) / 1e6);
@@ -165,6 +208,11 @@ async function runCheck(env, check, text) {
 
 // ── harness patterns ─────────────────────────────────────────────────────────
 const SYS = "You are being benchmarked. Answer the task directly and completely. No preamble.";
+const T_PLAN = "Plan how to solve this in at most 5 short bullets. Do NOT solve it yet.\n\nTask: ";
+const T_EXEC = "\n\nNow execute the plan and give the final answer.";
+const T_CRIT = "Critique your answer above for errors, then give your FINAL answer only.";
+const T_PICK = "Reply with only the number of the best candidate.";
+export const TEMPLATE_HASH = djb2([SYS, T_PLAN, T_EXEC, T_CRIT, T_PICK].join("|"));
 
 function similar(a, b) {
   // crude token-overlap similarity for "did the revision actually move"
@@ -176,37 +224,38 @@ function similar(a, b) {
   return inter / Math.max(ta.size, tb.size);
 }
 
-async function runPattern(env, variant, prompt) {
-  const base = { model: variant.model, effort: variant.effort, thinking: variant.thinking, maxTokens: variant.maxTokens, system: SYS };
+async function runPattern(env, variant, prompt, pod) {
+  const base = { system: SYS };
+  const call = (args) => callTurn(env, variant, pod, { ...base, ...args });
   const calls = [];
   let finalText = "", revised = null;
 
   if (variant.pattern === "single") {
-    const r = await callModel(env, { ...base, messages: [{ role: "user", content: prompt }] });
+    const r = await call({ messages: [{ role: "user", content: prompt }] });
     calls.push(r); finalText = r.text;
   } else if (variant.pattern === "plan") {
-    const p = await callModel(env, { ...base, maxTokens: 600, messages: [{ role: "user", content: `Plan how to solve this in at most 5 short bullets. Do NOT solve it yet.\n\nTask: ${prompt}` }] });
+    const p = await call({ maxTokens: 600, messages: [{ role: "user", content: T_PLAN + prompt }] });
     calls.push(p);
-    const r = await callModel(env, { ...base, messages: [{ role: "user", content: `Task: ${prompt}\n\nYour plan:\n${p.text}\n\nNow execute the plan and give the final answer.` }] });
+    const r = await call({ messages: [{ role: "user", content: `Task: ${prompt}\n\nYour plan:\n${p.text}${T_EXEC}` }] });
     calls.push(r); finalText = r.text;
   } else if (variant.pattern === "critique") {
-    const d = await callModel(env, { ...base, messages: [{ role: "user", content: prompt }] });
+    const d = await call({ messages: [{ role: "user", content: prompt }] });
     calls.push(d);
-    const r = await callModel(env, { ...base, messages: [
+    const r = await call({ messages: [
       { role: "user", content: prompt },
       { role: "assistant", content: d.text || "(empty)" },
-      { role: "user", content: "Critique your answer above for errors, then give your FINAL answer only." }
+      { role: "user", content: T_CRIT }
     ]});
     calls.push(r); finalText = r.text;
     revised = similar(d.text, r.text) < 0.85; // materially changed?
   } else if (variant.pattern === "bestofN") {
     const drafts = await Promise.all(
-      Array.from({ length: variant.n }, () => callModel(env, { ...base, messages: [{ role: "user", content: prompt }] }))
+      Array.from({ length: variant.n }, () => call({ messages: [{ role: "user", content: prompt }] }))
     );
     calls.push(...drafts);
     const listing = drafts.map((d, i) => `--- Candidate ${i + 1} ---\n${d.text.slice(0, 1500)}`).join("\n\n");
     const pick = await callModel(env, {
-      model: JUDGE_MODEL, maxTokens: 8, system: "Reply with only the number of the best candidate.",
+      model: JUDGE_MODEL, maxTokens: 8, system: T_PICK,
       messages: [{ role: "user", content: `Task: ${prompt}\n\n${listing}\n\nBest candidate number:` }]
     });
     calls.push(pick); // picker cost is harness cost — charged to the variant
@@ -219,6 +268,7 @@ async function runPattern(env, variant, prompt) {
     revised,
     refused: calls.some((c) => c.refused),
     calls: calls.length,
+    servedModels: [...new Set(calls.map((c) => c.servedModel).filter(Boolean))],
     tokensIn: calls.reduce((a, c) => a + (c.usage.input_tokens || 0) + (c.usage.cache_read_input_tokens || 0) + (c.usage.cache_creation_input_tokens || 0), 0),
     tokensOut: calls.reduce((a, c) => a + (c.usage.output_tokens || 0), 0),
     cost: calls.reduce((a, c) => a + c.cost, 0),
@@ -235,31 +285,47 @@ export async function runBenchmark(env, bench, { onProgress = () => {}, callCap 
   if (spec.estimatedCalls > callCap)
     return { id: newRunId(), ts: new Date().toISOString(), status: "too-large", errors: [`estimated ${spec.estimatedCalls} model calls exceeds cap ${callCap} — trim the spec or queue it for the nightly run`] };
 
+  // Resolve pods for open-weight variants; refuse to run against a cold pod.
+  const podMap = {};
+  const podIds = [...new Set(spec.variants.filter((v) => v.provider === "vllm").map((v) => v.pod_id))];
+  for (const pid of podIds) {
+    const st = await podStatus(env, pid);
+    if (!st.ready) {
+      return { id: newRunId(), ts: new Date().toISOString(), status: "pod-not-ready",
+               errors: [`pod ${pid} is not serving yet (status ${st.desiredStatus || "unknown"}, age ${st.ageMinutes ?? "?"}m) — weights may still be loading; check pod_status and retry`] };
+    }
+    podMap[pid] = st;
+    onProgress(`pod ${pid} ready: serving ${st.servedModel} at $${st.costPerHr}/hr`);
+  }
+
+  const budgetUsd = Math.min(spec.budgetCapUsd, 50);
   const t0 = Date.now();
   const cells = [];
   for (const v of spec.variants) for (const t of spec.tasks) for (let k = 0; k < spec.trials; k++) cells.push({ v, t, trial: k + 1 });
 
   const results = [];
-  let done = 0;
+  let done = 0, spent = 0, aborted = false;
   const pool = 4;
-  onProgress(`running ${cells.length} cells (${spec.estimatedCalls} model calls) across ${spec.variants.length} variants…`);
+  onProgress(`running ${cells.length} cells (${spec.estimatedCalls} model calls) across ${spec.variants.length} variants… budget cap $${budgetUsd}`);
   for (let i = 0; i < cells.length; i += pool) {
+    if (spent >= budgetUsd) { aborted = true; onProgress(`budget cap $${budgetUsd} reached — aborting with ${cells.length - i} cells unrun`); break; }
     const batch = cells.slice(i, i + pool);
     const settled = await Promise.all(batch.map(async ({ v, t, trial }) => {
       try {
-        const run = await runPattern(env, v, t.prompt);
+        const run = await runPattern(env, v, t.prompt, v.provider === "vllm" ? podMap[v.pod_id] : null);
         const check = run.refused ? { pass: false, evalCost: 0, note: "refused" } : await runCheck(env, t.check, run.finalText);
         return { variantId: v.id, taskId: t.id, trial, pass: !!check.pass, revised: run.revised, refused: run.refused,
-                 tokensIn: run.tokensIn, tokensOut: run.tokensOut, cost: run.cost, evalCost: check.evalCost, ms: run.ms,
-                 answer: (run.finalText || "").slice(0, 280) };
+                 servedModels: run.servedModels, tokensIn: run.tokensIn, tokensOut: run.tokensOut, cost: run.cost,
+                 evalCost: check.evalCost, ms: run.ms, answer: (run.finalText || "").slice(0, 280) };
       } catch (e) {
         return { variantId: v.id, taskId: t.id, trial, pass: false, error: (e?.message || String(e)).slice(0, 200),
                  tokensIn: 0, tokensOut: 0, cost: 0, evalCost: 0, ms: 0 };
       }
     }));
     results.push(...settled);
+    spent += settled.reduce((a, r) => a + r.cost + r.evalCost, 0);
     done += batch.length;
-    onProgress(`  ${done}/${cells.length} cells done`);
+    onProgress(`  ${done}/${cells.length} cells done ($${Math.round(spent * 1000) / 1000} spent)`);
   }
 
   // ── aggregate per variant ──
@@ -271,6 +337,8 @@ export async function runBenchmark(env, bench, { onProgress = () => {}, callCap 
       trials: rows.length,
       passes,
       passRate: rows.length ? passes / rows.length : 0,
+      passCI95: wilson(passes, rows.length), // R4: a rate without an interval is half a number
+      servedModels: [...new Set(rows.flatMap((r) => r.servedModels || []))],
       tokensIn: rows.reduce((a, r) => a + r.tokensIn, 0),
       tokensOut: rows.reduce((a, r) => a + r.tokensOut, 0),
       cost: round(cost),
@@ -312,10 +380,14 @@ export async function runBenchmark(env, bench, { onProgress = () => {}, callCap 
   return {
     id: newRunId(),
     ts: new Date().toISOString(),
-    status: "done",
+    status: aborted ? "partial-budget" : "done",
     wallMs: Date.now() - t0,
+    harness: { version: HARNESS_VERSION, templateHash: TEMPLATE_HASH },
+    budgetCapUsd: budgetUsd,
     totals: {
       calls: spec.estimatedCalls,
+      cellsRun: results.length,
+      cellsSkipped: cells.length - results.length,
       cost: round(results.reduce((a, r) => a + r.cost, 0)),
       evalCost: round(results.reduce((a, r) => a + r.evalCost, 0)),
       tokensIn: results.reduce((a, r) => a + r.tokensIn, 0),
@@ -331,14 +403,20 @@ function newRunId() { return crypto.randomUUID().slice(0, 8); }
 
 // Compact text summary of a run for the chat model / logs.
 export function summarizeRun(bench, run) {
-  if (run.status !== "done") return `run ${run.id}: ${run.status} — ${(run.errors || []).join("; ")}`;
-  const lines = [`run ${run.id} of "${bench.name}" — ${run.totals.calls} calls, $${run.totals.cost} (+$${run.totals.evalCost} eval), ${Math.round(run.wallMs / 1000)}s`];
+  if (run.status !== "done" && run.status !== "partial-budget")
+    return `run ${run.id}: ${run.status} — ${(run.errors || []).join("; ")}`;
+  const lines = [
+    `run ${run.id} of "${bench.name}"${run.status === "partial-budget" ? ` — BUDGET-ABORTED at $${run.budgetCapUsd} (${run.totals.cellsSkipped} cells unrun)` : ""} — ` +
+    `${run.totals.cellsRun} cells, $${run.totals.cost} (+$${run.totals.evalCost} eval), ${Math.round(run.wallMs / 1000)}s, harness ${run.harness?.version}#${run.harness?.templateHash}`
+  ];
   for (const v of run.variants) {
     const m = v.metrics;
+    const ci = m.passCI95 ? ` [95% CI ${Math.round(m.passCI95[0] * 100)}–${Math.round(m.passCI95[1] * 100)}%]` : "";
+    const served = m.servedModels && m.servedModels.length ? ` · served: ${m.servedModels.join(",")}` : "";
     lines.push(
-      `  ${v.id} [${v.model} · ${v.pattern}${v.n ? v.n : ""}${v.effort ? " · " + v.effort : ""}]: ` +
-      `pass ${m.passes}/${m.trials} (${Math.round(m.passRate * 100)}%) · $${m.cost} · cost-of-pass ${m.costOfPass === null ? "∞" : "$" + m.costOfPass} · ` +
-      `tok ${m.tokensIn}/${m.tokensOut} · ${m.avgLatencyMs}ms avg · convergence ${m.convergence === null ? "n/a" : m.convergence} (${m.convergenceKind}) · leverage ${m.leverage}`
+      `  ${v.id} [${v.model || v.pod_id} · ${v.pattern}${v.n ? v.n : ""}${v.effort ? " · " + v.effort : ""}]: ` +
+      `pass ${m.passes}/${m.trials} (${Math.round(m.passRate * 100)}%)${ci} · $${m.cost} · cost-of-pass ${m.costOfPass === null ? "∞" : "$" + m.costOfPass} · ` +
+      `tok ${m.tokensIn}/${m.tokensOut} · ${m.avgLatencyMs}ms avg · convergence ${m.convergence === null ? "n/a" : m.convergence} (${m.convergenceKind}) · leverage ${m.leverage}${served}`
     );
   }
   return lines.join("\n");
