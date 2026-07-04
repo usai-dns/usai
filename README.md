@@ -61,6 +61,22 @@ npm run deploy
 workers.dev URL is public. With the secret set, the UI prompts once for the key and sends it
 as `x-usai-key`.
 
+Optional provider keys — each unlocks that AI as a **driver** (operates the lab: reviews the
+charter via `get_charter`, saves studies, designs and runs experiments; identity logged per
+message, directive §7) *and* as a **subject** (benchmark variants):
+
+```bash
+npx wrangler secret put OPENAI_API_KEY     # gpt-* driver + subjects
+npx wrangler secret put GEMINI_API_KEY     # gemini-* driver + subjects
+npx wrangler secret put RUNPOD_API_KEY     # open-weight pods (vLLM) as subjects
+npx wrangler secret put HF_TOKEN           # gated HF repos (Llama) on pods
+```
+
+Pick the driver in the chat composer dropdown, or per-request via `POST /api/chat {driver}`.
+Unknown gpt-*/gemini-* model ids can be benchmarked by passing an explicit
+`pricing:{in,out}` ($/MTok) on the variant — the runner refuses to meter blind (R4).
+External agents can also drive the lab through their own brains via `/mcp` (directive §6).
+
 ## API
 
 | Route | Method | Purpose |

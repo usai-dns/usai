@@ -127,9 +127,12 @@
     <div class="composer">
       <div class="row">
         <textarea id="input" placeholder="Ask, paste a link, or describe an experiment…"></textarea>
-        <button class="btn primary" id="send" style="align-self:stretch;padding:0 18px">Send</button>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button class="btn primary" id="send" style="flex:1;padding:0 18px">Send</button>
+          <select id="driver" title="driver model (logged per message — directive §7)"></select>
+        </div>
       </div>
-      <div class="hint">Enter to send · Shift+Enter for a newline · everything here is saved to the shared thread</div>
+      <div class="hint">Enter to send · Shift+Enter for a newline · saved to the shared thread · the driver dropdown picks which AI operates the lab</div>
     </div>
   </main>
 </div>
@@ -255,7 +258,9 @@
     addUser(text);
     let assistant = newAssistant();
     try {
-      const res = await api("/api/chat", { method: "POST", body: JSON.stringify({ threadId: state.threadId, message: text }) });
+      const driver = $("driver").value || undefined;
+      if (driver) localStorage.setItem("usai_driver", driver);
+      const res = await api("/api/chat", { method: "POST", body: JSON.stringify({ threadId: state.threadId, message: text, driver }) });
       if (!res.ok) { addSys("⚠ " + esc(await res.text()), "err"); }
       else await readNDJSON(res, (ev) => {
         if (ev.t === "meta") { state.threadId = ev.threadId; }
@@ -390,7 +395,14 @@
       if (!res.ok) throw new Error("state " + res.status);
       const s = await res.json();
       state.threads = s.threads || []; state.studies = s.studies || []; state.benchmarks = s.benchmarks || [];
-      $("status").innerHTML = `key: <b>${s.hasKey ? "set" : "missing"}</b> · ${s.model.replace("claude-", "")} · queue: <b>${s.queue}</b>`;
+      const pods = (s.pods || []).length;
+      $("status").innerHTML = `key: <b>${s.hasKey ? "set" : "missing"}</b> · queue: <b>${s.queue}</b>${pods ? ` · pods: <b>${pods}</b>` : ""}${s.runpod === false ? " · runpod: off" : ""}`;
+      // driver picker (directive §7: the operating model is a logged choice)
+      const sel = $("driver");
+      const drivers = s.drivers || [];
+      const saved = localStorage.getItem("usai_driver");
+      sel.innerHTML = drivers.map((d) => `<option value="${d.model}">${d.model.replace("claude-", "")}</option>`).join("");
+      if (saved && drivers.some((d) => d.model === saved)) sel.value = saved;
       renderList();
     } catch (e) {
       $("status").textContent = "offline: " + (e.message || e);

@@ -8,6 +8,13 @@ main = "src/worker.js"
 compatibility_date = "2026-06-18"
 compatibility_flags = ["nodejs_compat"]
 
+# Bundle markdown as text modules so the driver can serve the charter verbatim
+# (get_charter tool reads DIRECTIVE.md / METHODS.md at build time — no duplication).
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
@@ -35,3 +42,5 @@ crons = ["0 * * * *"]
 #     header. Recommended: chat and runs spend YOUR Anthropic tokens.
 #   RUNPOD_API_KEY — optional; enables open-weight pod provisioning (vLLM on RunPod)
 #   HF_TOKEN — optional; passed to pods for gated HF repos (e.g. Llama)
+#   OPENAI_API_KEY — optional; unlocks gpt-* as driver AND benchmark subject
+#   GEMINI_API_KEY — optional; unlocks gemini-* as driver AND benchmark subject

@@ -24,6 +24,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { callVllm, podStatus } from "./pods.js";
+import { callOpenAICompat, hasProvider } from "./providers.js";
 
 // Ruler identity (R2): scores are conditional on the harness. Bump the version
 // whenever SYS or a pattern template changes; the hash is stamped on every run.
@@ -38,16 +39,25 @@ export function wilson(k, n, z = 1.96) {
   return [Math.max(0, (c - m) / d), Math.min(1, (c + m) / d)].map((x) => Math.round(x * 1000) / 1000);
 }
 
-// $ per MTok — in/out (+ cache read ≈0.1×in, cache write ≈1.25×in).
+// $ per MTok — in/out (+ cache read ≈0.1×in, cache write ≈1.25×in for anthropic).
+// Frontier-API entries beyond Anthropic are best-known list prices — verify when
+// they matter, or pass an explicit per-variant pricing override (R4: no cost, no
+// result; the runner refuses to meter blind).
 export const PRICING = {
-  "claude-fable-5": { in: 10, out: 50 },
-  "claude-opus-4-8": { in: 5, out: 25 },
-  "claude-opus-4-7": { in: 5, out: 25 },
-  "claude-opus-4-6": { in: 5, out: 25 },
-  "claude-sonnet-4-6": { in: 3, out: 15 },
-  "claude-haiku-4-5": { in: 1, out: 5 }
+  "claude-fable-5": { in: 10, out: 50, provider: "anthropic" },
+  "claude-opus-4-8": { in: 5, out: 25, provider: "anthropic" },
+  "claude-opus-4-7": { in: 5, out: 25, provider: "anthropic" },
+  "claude-opus-4-6": { in: 5, out: 25, provider: "anthropic" },
+  "claude-sonnet-4-6": { in: 3, out: 15, provider: "anthropic" },
+  "claude-haiku-4-5": { in: 1, out: 5, provider: "anthropic" },
+  "gpt-5": { in: 1.25, out: 10, provider: "openai" },
+  "gpt-5-mini": { in: 0.25, out: 2, provider: "openai" },
+  "gpt-5-nano": { in: 0.05, out: 0.4, provider: "openai" },
+  "gemini-2.5-pro": { in: 1.25, out: 10, provider: "google" },
+  "gemini-2.5-flash": { in: 0.3, out: 2.5, provider: "google" }
 };
-export const MODELS = Object.keys(PRICING);
+export const MODELS = Object.keys(PRICING).filter((m) => PRICING[m].provider === "anthropic");
+export const API_MODELS = (provider) => Object.keys(PRICING).filter((m) => PRICING[m].provider === provider);
 const JUDGE_MODEL = "claude-haiku-4-5"; // checker/picker — cheap, metered separately where noted
 const PATTERNS = ["single", "plan", "critique", "bestofN"];
 
@@ -91,12 +101,20 @@ async function callModel(env, { model, system, messages, effort, thinking, maxTo
   };
 }
 
-// Route a harness turn to the right provider. vLLM pods speak OpenAI-format
-// messages (system as a message role); anthropic takes system separately.
+// Route a harness turn to the right provider. vLLM pods and OpenAI-compatible
+// APIs speak OpenAI-format messages (system as a message role); anthropic takes
+// system separately.
 async function callTurn(env, variant, pod, { system, messages, maxTokens }) {
   if (variant.provider === "vllm") {
     const oai = system ? [{ role: "system", content: system }, ...messages] : messages;
     return callVllm(env, pod, { messages: oai, maxTokens: maxTokens || variant.maxTokens });
+  }
+  if (variant.provider === "openai" || variant.provider === "google") {
+    const oai = system ? [{ role: "system", content: system }, ...messages] : messages;
+    return callOpenAICompat(env, {
+      provider: variant.provider, model: variant.model, messages: oai,
+      maxTokens: maxTokens || variant.maxTokens, effort: variant.effort, pricing: variant.pricing
+    });
   }
   return callModel(env, {
     model: variant.model, system, messages,
@@ -133,18 +151,27 @@ export function validateSpec(raw) {
 
   variants.forEach((v, i) => {
     const id = String(v.id || "v" + (i + 1));
-    const provider = v.provider === "vllm" ? "vllm" : "anthropic";
+    const provider = ["vllm", "openai", "google", "anthropic"].includes(v.provider) ? v.provider : "anthropic";
     let model = v.model ? String(v.model) : null;
+    let pricing;
     if (provider === "anthropic") {
-      if (!MODELS.includes(model)) errors.push(`variant ${id}: model must be one of ${MODELS.join(", ")} (or set provider:"vllm" with a pod_id for open weights)`);
-    } else if (!v.pod_id) {
-      errors.push(`variant ${id}: provider "vllm" requires pod_id (provision one first)`);
+      if (!MODELS.includes(model)) errors.push(`variant ${id}: model must be one of ${MODELS.join(", ")} (or set provider:"vllm"|"openai"|"google")`);
+    } else if (provider === "vllm") {
+      if (!v.pod_id) errors.push(`variant ${id}: provider "vllm" requires pod_id (provision one first)`);
+    } else {
+      // openai/google: known-priced model, or an explicit override (R4: no cost, no result)
+      if (!model) errors.push(`variant ${id}: provider "${provider}" requires a model id`);
+      const known = model && PRICING[model] && PRICING[model].provider === provider ? PRICING[model] : null;
+      const override = v.pricing && Number(v.pricing.in) > 0 && Number(v.pricing.out) > 0
+        ? { in: Number(v.pricing.in), out: Number(v.pricing.out) } : null;
+      pricing = override || (known ? { in: known.in, out: known.out } : null);
+      if (!pricing) errors.push(`variant ${id}: unknown ${provider} model "${model}" — pass pricing:{in,out} in $/MTok (a result without cost is discarded, R4)`);
     }
     const pattern = PATTERNS.includes(v.pattern) ? v.pattern : "single";
     const n = pattern === "bestofN" ? Math.max(2, Math.min(4, Number(v.n) || 2)) : undefined;
-    const effort = provider === "anthropic" && ["low", "medium", "high", "xhigh", "max"].includes(v.effort) ? v.effort : undefined;
+    const effort = provider !== "vllm" && ["low", "medium", "high", "xhigh", "max"].includes(v.effort) ? v.effort : undefined;
     spec.variants.push({
-      id, provider, model, pattern, n, effort,
+      id, provider, model, pattern, n, effort, pricing,
       pod_id: provider === "vllm" ? String(v.pod_id) : undefined,
       thinking: v.thinking === "off" ? "off" : "adaptive",
       maxTokens: Math.max(256, Math.min(8000, Number(v.maxTokens) || 1500)),
@@ -170,7 +197,7 @@ export function estimateCost(spec) {
       dollars += per * spec.tasks.length * spec.trials * (2.5 * (20 / 3600));
       continue;
     }
-    const p = PRICING[v.model];
+    const p = v.pricing || PRICING[v.model];
     // assume ~1.2k in / maxTokens out worst case per call
     dollars += per * spec.tasks.length * spec.trials * ((1200 * p.in + v.maxTokens * p.out) / 1e6);
   }
@@ -284,6 +311,14 @@ export async function runBenchmark(env, bench, { onProgress = () => {}, callCap 
   if (errors.length) return { id: newRunId(), ts: new Date().toISOString(), status: "invalid", errors };
   if (spec.estimatedCalls > callCap)
     return { id: newRunId(), ts: new Date().toISOString(), status: "too-large", errors: [`estimated ${spec.estimatedCalls} model calls exceeds cap ${callCap} — trim the spec or queue it for the nightly run`] };
+
+  // Frontier-API preflight: refuse to start if a variant's provider key is missing.
+  for (const p of [...new Set(spec.variants.map((v) => v.provider))]) {
+    if ((p === "openai" || p === "google") && !hasProvider(env, p)) {
+      return { id: newRunId(), ts: new Date().toISOString(), status: "provider-not-configured",
+               errors: [`provider "${p}" needs its API key secret (${p === "openai" ? "OPENAI_API_KEY" : "GEMINI_API_KEY"}) — npx wrangler secret put`] };
+    }
+  }
 
   // Resolve pods for open-weight variants; refuse to run against a cold pod.
   const podMap = {};

@@ -6,14 +6,19 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as store from "./store.js";
 import * as pods from "./pods.js";
-import { runBenchmark, validateSpec, estimateCost, summarizeRun, MODELS, PRICING, HARNESS_VERSION, TEMPLATE_HASH } from "./lab.js";
+import { runBenchmark, validateSpec, estimateCost, summarizeRun, MODELS, API_MODELS, PRICING, HARNESS_VERSION, TEMPLATE_HASH } from "./lab.js";
+import { hasProvider, availableDrivers } from "./providers.js";
+import DIRECTIVE_MD from "../DIRECTIVE.md";
+import METHODS_MD from "../METHODS.md";
 
 const SPEC_DOC =
   "Spec shape: {tasks:[{id?, prompt, check:{type:'contains'|'regex'|'number'|'judge', value?, rubric?, tolerance?}}] (1-8), " +
-  "variants:[{id?, label?, provider?:'anthropic'|'vllm', model?, pod_id?, pattern:'single'|'plan'|'critique'|'bestofN', n?, " +
-  "effort?:'low'|'medium'|'high'|'xhigh', thinking?:'adaptive'|'off', maxTokens?}] (1-6), trials?:1-3, budgetCapUsd?:0.5-50 (default 10), " +
+  "variants:[{id?, label?, provider?:'anthropic'|'openai'|'google'|'vllm', model?, pod_id?, pricing?:{in,out}, " +
+  "pattern:'single'|'plan'|'critique'|'bestofN', n?, effort?:'low'|'medium'|'high'|'xhigh', thinking?:'adaptive'|'off', maxTokens?}] (1-6), " +
+  "trials?:1-3, budgetCapUsd?:0.5-50 (default 10), " +
   `problem_class?:'extraction'|'drafting'|'classification'|'conversation'|'routing'}. Anthropic models: ${MODELS.join(", ")}. ` +
-  "Open weights: provision a pod first, then use provider:'vllm' + pod_id (effort/thinking don't apply there). " +
+  `OpenAI: ${API_MODELS("openai").join(", ")}; Google: ${API_MODELS("google").join(", ")} — other model ids need an explicit pricing:{in,out} $/MTok override (R4), and the provider's key secret must be set. ` +
+  "Open weights: provision a pod first, then provider:'vllm' + pod_id (effort/thinking don't apply there). " +
   "variants[0] is the BASELINE — leverage is measured against it (R1: hold the harness constant when the model is the variable).";
 
 export const TOOL_DEFS = [
@@ -144,6 +149,11 @@ export const TOOL_DEFS = [
     input_schema: { type: "object", properties: { pod_id: { type: "string" } }, required: ["pod_id"] }
   },
   {
+    name: "get_charter",
+    description: "Read the governing documents verbatim: the INTELLISTUDY DIRECTIVE (mission, R1-R5, benchmark policy, provisioning path, driver constraints) and METHODS.md (metric definitions, budgets). Use when reviewing, quoting, or checking an action against the charter — do not answer charter questions from memory.",
+    input_schema: { type: "object", properties: {} }
+  },
+  {
     name: "get_calibration_map",
     description: "The anchor→our-problems calibration map for a problem class (directive §2). Returns measured vectors per model and honest status — it reports insufficient-data until enough models share Class A + Class B runs.",
     input_schema: { type: "object", properties: { problem_class: { type: "string" } } }
@@ -173,11 +183,21 @@ export async function execTool(env, name, input, emit = () => {}) {
     case "list_models": {
       return JSON.stringify({
         anthropic: MODELS.map((m) => ({ model: m, usd_per_mtok: PRICING[m] })),
+        openai: { enabled: hasProvider(env, "openai"), models: API_MODELS("openai").map((m) => ({ model: m, usd_per_mtok: PRICING[m] })), note: "other gpt-* ids allowed with an explicit pricing override" },
+        google: { enabled: hasProvider(env, "google"), models: API_MODELS("google").map((m) => ({ model: m, usd_per_mtok: PRICING[m] })), note: "other gemini-* ids allowed with an explicit pricing override" },
+        drivers_available: availableDrivers(env),
         open_weight_roster: pods.ROSTER,
         gpu_tiers: pods.GPU_TIERS,
         pods: await pods.listPods(env),
         runpod_enabled: pods.hasRunpod(env),
         note: "roster entries are suggestions from the directive §3 — provision_pod accepts any HF repo; verify latest generations via the weekly scan"
+      });
+    }
+    case "get_charter": {
+      return JSON.stringify({
+        directive: DIRECTIVE_MD,
+        methods: METHODS_MD,
+        system_spec: "Architecture: one Cloudflare Worker. src/worker.js routes (+hourly cron: pod reaper → queue drain → Monday digest); src/agent.js chat driver (constitution as system prompt, driver identity logged per message); src/tools.js shared tool registry (chat + MCP at /mcp); src/lab.js runner (patterns single/plan/critique/bestofN, checkers, Wilson CIs, budget aborts, harness stamping); src/pods.js RunPod vLLM provisioning (TTL reaper, $50 guard); src/providers.js OpenAI/Gemini access; src/store.js KV registry (studies, versioned frozen benchmarks, threads, problems, queue). UI: public/index.html."
       });
     }
     case "get_study": {

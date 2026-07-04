@@ -12,8 +12,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as store from "./store.js";
 import { TOOL_DEFS, SERVER_TOOLS, execTool } from "./tools.js";
+import { callOpenAICompat } from "./providers.js";
 
 export const CHAT_MODEL = "claude-opus-4-8";
+
+// Threads persist extra fields (driver, toolsUsed) for §7 auditability; the
+// APIs reject unknown fields, so strip to {role, content} before sending.
+const wire = (messages) => messages.map(({ role, content }) => ({ role, content }));
 
 function client(env) {
   return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: 80000, maxRetries: 1 });
@@ -90,7 +95,7 @@ export function chatStream(env, { thread, userText }) {
         ]);
         const system = systemPrompt(libraryDigest(studies, benches, problems), CHAT_MODEL);
 
-        const messages = [...thread.messages, { role: "user", content: userText }];
+        const messages = [...wire(thread.messages), { role: "user", content: userText }];
         const newMessages = [{ role: "user", content: userText }];
 
         for (let iter = 0; iter < 8; iter++) {
@@ -116,8 +121,8 @@ export function chatStream(env, { thread, userText }) {
           }
 
           const msg = await stream.finalMessage();
-          const assistantMsg = { role: "assistant", content: msg.content };
-          messages.push(assistantMsg);
+          const assistantMsg = { role: "assistant", content: msg.content, driver: CHAT_MODEL };
+          messages.push({ role: "assistant", content: msg.content });
           newMessages.push(assistantMsg);
 
           if (msg.stop_reason === "pause_turn") continue; // server tools resuming
@@ -157,6 +162,97 @@ export function chatStream(env, { thread, userText }) {
         } catch {}
         emit({ t: "done" });
       } finally {
+        controller.close();
+      }
+    }
+  });
+}
+
+// ── alternate drivers (directive §3/§7): GPT / Gemini operate the same lab ───
+// Same constitution, same tool registry, OpenAI-format function calling. No
+// Anthropic server web tools here (web research stays on the Claude driver);
+// everything lab-side — charter review, studies, benchmarks, provisioning,
+// runs — is identical. Driver identity is logged on every persisted message.
+// History is flattened to text turns (cross-driver threads stay readable both ways).
+
+function oaiTools() {
+  return TOOL_DEFS.map((d) => ({ type: "function", function: { name: d.name, description: d.description, parameters: d.input_schema } }));
+}
+
+function flattenHistory(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (m.role === "user" && typeof m.content === "string") out.push({ role: "user", content: m.content });
+    else if (m.role === "assistant") {
+      const text = typeof m.content === "string"
+        ? m.content
+        : (m.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      if (text) out.push({ role: "assistant", content: text });
+    }
+    // tool_use/tool_result exchanges are loop-internal — skipped in cross-driver history
+  }
+  return out;
+}
+
+export function chatStreamAlt(env, { thread, userText, provider, model }) {
+  const enc = new TextEncoder();
+  return new ReadableStream({
+    async start(controller) {
+      const emit = (obj) => controller.enqueue(enc.encode(JSON.stringify(obj) + "\n"));
+      // heartbeat: a single long reasoning call emits nothing — keep the edge alive
+      const beat = setInterval(() => { try { emit({ t: "hb" }); } catch {} }, 15000);
+      try {
+        if (!thread.title || thread.title === "New thread") thread.title = userText.slice(0, 90);
+        emit({ t: "meta", threadId: thread.id, title: thread.title, driver: model });
+
+        const [studies, benches, problems] = await Promise.all([
+          store.listStudies(env), store.listBenches(env), store.listProblems(env)
+        ]);
+        const system = systemPrompt(libraryDigest(studies, benches, problems), model) +
+          "\n\nNOTE: on this driver you have the lab tools but NOT web_search/web_fetch — for web research, say so and suggest the Claude driver; use get_charter for governing documents.";
+
+        const messages = [{ role: "system", content: system }, ...flattenHistory(thread.messages), { role: "user", content: userText }];
+        const texts = [];
+        const toolsUsed = [];
+
+        for (let iter = 0; iter < 8; iter++) {
+          const r = await callOpenAICompat(env, { provider, model, messages, maxTokens: 4000, tools: oaiTools() });
+          if (r.text) { texts.push(r.text); emit({ t: "delta", s: r.text + "\n" }); }
+          if (!r.toolCalls.length) break;
+
+          messages.push({ role: "assistant", content: r.text || null, tool_calls: r.toolCalls });
+          for (const tc of r.toolCalls) {
+            const name = tc.function?.name || "";
+            emit({ t: "tool", name, label: "lab" });
+            toolsUsed.push(name);
+            let out;
+            try {
+              const args = JSON.parse(tc.function?.arguments || "{}");
+              out = await execTool(env, name, args, emit);
+            } catch (e) {
+              out = JSON.stringify({ error: (e?.message || String(e)).slice(0, 400) });
+              emit({ t: "error", s: `tool ${name} failed: ${(e?.message || e)}`.slice(0, 200) });
+            }
+            messages.push({ role: "tool", tool_call_id: tc.id, content: out });
+          }
+        }
+
+        thread.messages = [
+          ...thread.messages,
+          { role: "user", content: userText },
+          { role: "assistant", content: texts.join("\n\n") || "(no text output)", driver: model, toolsUsed }
+        ];
+        await store.saveThread(env, thread);
+        emit({ t: "done" });
+      } catch (err) {
+        emit({ t: "error", s: (err?.message || String(err)).slice(0, 300) });
+        try {
+          thread.messages = [...thread.messages, { role: "user", content: userText }];
+          await store.saveThread(env, thread);
+        } catch {}
+        emit({ t: "done" });
+      } finally {
+        clearInterval(beat);
         controller.close();
       }
     }

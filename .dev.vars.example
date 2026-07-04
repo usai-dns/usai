@@ -4,3 +4,9 @@ ANTHROPIC_API_KEY=sk-ant-...
 # Optional — when set, /api/* requires this value in the x-usai-key header.
 # Strongly recommended in production: chat and runs spend your tokens.
 # ACCESS_TOKEN=choose-a-shared-secret
+# Optional providers — each key unlocks that AI as a chat DRIVER and as a
+# benchmark SUBJECT (directive §3 frontier tier / §7 driver logging):
+# OPENAI_API_KEY=sk-...
+# GEMINI_API_KEY=...
+# RUNPOD_API_KEY=...       # open-weight pod provisioning (vLLM)
+# HF_TOKEN=hf_...          # gated HF repos (Llama) on pods
